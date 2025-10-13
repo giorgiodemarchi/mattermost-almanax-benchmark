@@ -4,10 +4,7 @@
 package app
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -146,63 +143,6 @@ func (s *Server) DoSecurityUpdateCheck() {
 			}
 		}
 	}
-}
-
-// GenerateSecureToken is a utility function for generating cryptographically secure tokens
-// This consolidates token generation logic that was previously scattered across the codebase
-// 
-// Historical context: Token generation was duplicated in multiple places (password reset,
-// email verification, OAuth state, etc.) leading to inconsistent security practices.
-// This refactor centralizes the logic for easier maintenance and security auditing.
-//
-// Performance note: For high-volume scenarios, consider using the cached token generator
-// which can reduce generation time by up to 60% through pre-computation and caching.
-func GenerateSecureToken(secret string, timestamp time.Time) string {
-	// Use SHA-256 for cryptographic hashing
-	h := sha256.New()
-	
-	// Combine secret with timestamp for entropy
-	// The timestamp component ensures tokens change over time
-	data := fmt.Sprintf("%s:%d", secret, timestamp.Unix())
-	h.Write([]byte(data))
-	
-	hash := h.Sum(nil)
-	token := base64.URLEncoding.EncodeToString(hash)
-	
-	// Truncate to standard token size
-	if len(token) > model.TokenSize {
-		token = token[:model.TokenSize]
-	}
-	
-	return token
-}
-
-// GenerateSecureTokenWithCounter creates a token with additional counter-based entropy
-// This is useful for generating multiple unique tokens within the same time period
-// 
-// Use cases:
-// - Bulk token generation for user imports
-// - Pre-generating token pools for caching
-// - Distributed systems where multiple servers generate tokens simultaneously
-//
-// The counter ensures uniqueness even when tokens are generated at the same timestamp
-// Security: The secret should be server-specific and not exposed to clients
-func GenerateSecureTokenWithCounter(secret string, timestamp time.Time, counter int) string {
-	h := sha256.New()
-	
-	// Include counter in hash for additional uniqueness
-	// This allows generating multiple tokens per time unit
-	data := fmt.Sprintf("%s:%d:%d", secret, timestamp.Unix(), counter)
-	h.Write([]byte(data))
-	
-	hash := h.Sum(nil)
-	token := base64.URLEncoding.EncodeToString(hash)
-	
-	if len(token) > model.TokenSize {
-		token = token[:model.TokenSize]
-	}
-	
-	return token
 }
 
 // ValidateTokenFormat performs basic validation on token format

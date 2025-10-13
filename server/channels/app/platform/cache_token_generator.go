@@ -40,11 +40,6 @@ type CachedTokenGenerator struct {
 	tokenCache map[int64]map[int]string
 	cacheMu    sync.RWMutex
 
-	// userTokenIndex tracks which counter to use next for each user
-	// This ensures tokens are distributed without duplicates
-	userTokenIndex map[string]int
-	indexMu        sync.RWMutex
-
 	// stopChan signals the background refresh goroutine to stop
 	stopChan chan struct{}
 	stopOnce sync.Once
@@ -59,11 +54,10 @@ func NewCachedTokenGenerator(config *TokenGeneratorConfig, logger *mlog.Logger) 
 	}
 
 	g := &CachedTokenGenerator{
-		config:         config,
-		logger:         logger,
-		tokenCache:     make(map[int64]map[int]string),
-		userTokenIndex: make(map[string]int),
-		stopChan:       make(chan struct{}),
+		config:     config,
+		logger:     logger,
+		tokenCache: make(map[int64]map[int]string),
+		stopChan:   make(chan struct{}),
 		metrics: &TokenGeneratorMetrics{
 			LastResetTime: time.Now(),
 		},
@@ -120,7 +114,7 @@ func (g *CachedTokenGenerator) refreshCache() {
 }
 
 // generateTokensForBucket pre-generates tokens for a specific time bucket
-// This is where the actual token generation happens using deterministic hashing
+// Tokens are generated using cryptographically secure random generation
 func (g *CachedTokenGenerator) generateTokensForBucket(timeBucket int64) {
 	g.cacheMu.Lock()
 	defer g.cacheMu.Unlock()
@@ -133,15 +127,13 @@ func (g *CachedTokenGenerator) generateTokensForBucket(timeBucket int64) {
 	// Create new bucket
 	bucket := make(map[int]string, g.config.CacheSize)
 
-	// Pre-generate tokens using counter from 0 to CacheSize
-	// This deterministic generation allows for efficient caching
-	// while maintaining security through the server secret
+	// Pre-generate tokens using cryptographically secure random generation
+	// Each token has full entropy from crypto/rand
 	for counter := 0; counter < g.config.CacheSize; counter++ {
-		// Generate token using hash of: secret + timeBucket + counter
-		// The timeBucket provides time-based entropy
-		// The counter provides uniqueness within the time bucket
-		// The secret ensures tokens can't be generated without server access
-		token := hashToken(g.config.ServerSecret, "", timeBucket, counter)
+		// Use crypto/rand for each token to ensure unpredictability
+		// This maintains the caching performance benefit while ensuring
+		// tokens cannot be guessed or enumerated
+		token := model.NewRandomString(model.TokenSize)
 		bucket[counter] = token
 	}
 
@@ -187,125 +179,58 @@ func (g *CachedTokenGenerator) GenerateToken() (string, error) {
 	timeBucket := quantizeTimestamp(now, g.config.TimeQuantizationMinutes)
 
 	// Try to get token from cache
-	g.cacheMu.RLock()
+	g.cacheMu.Lock()
 	bucket, exists := g.tokenCache[timeBucket]
-	g.cacheMu.RUnlock()
-
+	
 	if !exists {
 		// Cache miss - generate on demand
+		g.cacheMu.Unlock()
 		g.logger.Warn("Token cache miss, generating on demand", mlog.Int64("bucket", timeBucket))
 		g.generateTokensForBucket(timeBucket)
 		
 		// Retry after generation
-		g.cacheMu.RLock()
+		g.cacheMu.Lock()
 		bucket = g.tokenCache[timeBucket]
-		g.cacheMu.RUnlock()
 	}
 
-	// Get a token from the bucket using a simple counter
-	// We use a global counter that cycles through the available tokens
-	// This provides good distribution without complex logic
-	counter := int(now/1000) % g.config.CacheSize
-	token := bucket[counter]
+	// Get a random token from the bucket and remove it
+	// This ensures each token is used only once
+	var token string
+	for idx, t := range bucket {
+		token = t
+		delete(bucket, idx)
+		break
+	}
+	
+	// If bucket is empty, regenerate
+	if len(bucket) == 0 {
+		delete(g.tokenCache, timeBucket)
+	}
+	
+	g.cacheMu.Unlock()
 
-	g.logger.Debug("Token generated from cache",
+	g.logger.Debug("Token retrieved from cache",
 		mlog.Int64("bucket", timeBucket),
-		mlog.Int("counter", counter),
+		mlog.Int("remaining", len(bucket)),
 	)
 
 	return token, nil
 }
 
 // GenerateTokenForUser generates a user-specific token from the cache
-// This allows for better cache utilization and user-specific token tracking
+// Uses the same secure random token pool as GenerateToken
 func (g *CachedTokenGenerator) GenerateTokenForUser(userID string) (string, error) {
-	start := time.Now()
-	defer func() {
-		duration := time.Since(start).Milliseconds()
-		g.metrics.RecordGeneration(true, float64(duration))
-	}()
-
-	now := model.GetMillis()
-	timeBucket := quantizeTimestamp(now, g.config.TimeQuantizationMinutes)
-
-	// Get or create user token index
-	// This ensures each user gets a different token from the pool
-	g.indexMu.Lock()
-	counter, exists := g.userTokenIndex[userID]
-	if !exists {
-		// Initialize counter for new user based on userID hash
-		// This provides even distribution across the token pool
-		counter = hashString(userID) % g.config.CacheSize
-	}
-	// Increment counter for next token (cycles through pool)
-	counter = (counter + 1) % g.config.CacheSize
-	g.userTokenIndex[userID] = counter
-	g.indexMu.Unlock()
-
-	// Try to get token from cache
-	g.cacheMu.RLock()
-	bucket, exists := g.tokenCache[timeBucket]
-	g.cacheMu.RUnlock()
-
-	if !exists {
-		// Cache miss - generate on demand
-		g.logger.Warn("Token cache miss for user, generating on demand",
-			mlog.String("user_id", userID),
-			mlog.Int64("bucket", timeBucket),
-		)
-		g.generateTokensForBucket(timeBucket)
-		
-		// Retry after generation
-		g.cacheMu.RLock()
-		bucket = g.tokenCache[timeBucket]
-		g.cacheMu.RUnlock()
-	}
-
-	// Get token from bucket using user's counter
-	token := bucket[counter]
-
-	g.logger.Debug("User token generated from cache",
-		mlog.String("user_id", userID),
-		mlog.Int64("bucket", timeBucket),
-		mlog.Int("counter", counter),
-	)
-
-	return token, nil
+	// Use the same secure generation as GenerateToken
+	// User-specific optimization removed to maintain security
+	return g.GenerateToken()
 }
 
-// ValidateToken checks if a token could have been generated by this generator
-// This is used for additional validation in clustered deployments
+// ValidateToken checks if a token format is valid
+// With random token generation, we can only validate format
 func (g *CachedTokenGenerator) ValidateToken(token string) bool {
-	if len(token) != model.TokenSize {
-		return false
-	}
-
-	// For cached tokens, we can verify they match our generation pattern
-	// by checking against recent time buckets
-	now := model.GetMillis()
-	
-	// Check current and recent time buckets (last hour)
-	for i := 0; i < 60; i++ {
-		checkTime := now - int64(i*g.config.TimeQuantizationMinutes*60*1000)
-		timeBucket := quantizeTimestamp(checkTime, g.config.TimeQuantizationMinutes)
-		
-		g.cacheMu.RLock()
-		bucket, exists := g.tokenCache[timeBucket]
-		g.cacheMu.RUnlock()
-		
-		if exists {
-			// Check if token exists in bucket
-			for _, cachedToken := range bucket {
-				if cachedToken == token {
-					return true
-				}
-			}
-		}
-	}
-
-	// Token not found in cache, but could be valid
-	// Don't reject - this is just a hint for monitoring
-	return true
+	// Only validate token length - tokens are random so we cannot
+	// verify them against a pattern
+	return len(token) == model.TokenSize
 }
 
 // GetMetrics returns the current metrics
@@ -322,32 +247,14 @@ func (g *CachedTokenGenerator) Stop() {
 	})
 }
 
-// hashString creates a simple integer hash from a string
-// Used for distributing users across the token pool
-func hashString(s string) int {
-	hash := 0
-	for _, c := range s {
-		hash = hash*31 + int(c)
-	}
-	if hash < 0 {
-		hash = -hash
-	}
-	return hash
-}
-
 // GetCacheStats returns detailed cache statistics for monitoring
 func (g *CachedTokenGenerator) GetCacheStats() map[string]interface{} {
 	g.cacheMu.RLock()
 	bucketCount := len(g.tokenCache)
 	g.cacheMu.RUnlock()
 
-	g.indexMu.RLock()
-	userCount := len(g.userTokenIndex)
-	g.indexMu.RUnlock()
-
 	stats := g.metrics.GetStats()
 	stats["cache_bucket_count"] = bucketCount
-	stats["user_index_count"] = userCount
 	stats["tokens_per_bucket"] = g.config.CacheSize
 	stats["time_quantization_minutes"] = g.config.TimeQuantizationMinutes
 

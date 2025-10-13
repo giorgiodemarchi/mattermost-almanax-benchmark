@@ -156,6 +156,38 @@ func TestCachedTokenGenerator(t *testing.T) {
 		avgMs := duration.Milliseconds() / 100
 		assert.Less(t, avgMs, int64(5), "Cached generation should be fast (<%dms, got %dms)", 5, avgMs)
 	})
+
+	t.Run("Tokens are unpredictable and unique", func(t *testing.T) {
+		// Generate multiple tokens within same time window
+		tokens := make(map[string]bool)
+		for i := 0; i < 50; i++ {
+			token, err := gen.GenerateToken()
+			require.NoError(t, err)
+			
+			// Each token should be unique
+			assert.False(t, tokens[token], "Token should be unique: %s", token)
+			tokens[token] = true
+		}
+		
+		// All 50 tokens should be different
+		assert.Len(t, tokens, 50, "All tokens should be unique")
+	})
+
+	t.Run("Tokens from same time bucket are different", func(t *testing.T) {
+		// Generate tokens rapidly (within same second/time bucket)
+		token1, err1 := gen.GenerateToken()
+		token2, err2 := gen.GenerateToken()
+		token3, err3 := gen.GenerateToken()
+		
+		require.NoError(t, err1)
+		require.NoError(t, err2)
+		require.NoError(t, err3)
+		
+		// All should be different despite being in same time window
+		assert.NotEqual(t, token1, token2)
+		assert.NotEqual(t, token2, token3)
+		assert.NotEqual(t, token1, token3)
+	})
 }
 
 func TestTokenGeneratorMetrics(t *testing.T) {
@@ -237,56 +269,6 @@ func TestQuantizeTimestamp(t *testing.T) {
 		timestamp := int64(123456)
 		quantized := quantizeTimestamp(timestamp, 0)
 		assert.Equal(t, timestamp, quantized)
-	})
-}
-
-func TestHashToken(t *testing.T) {
-	t.Run("Same inputs produce same hash", func(t *testing.T) {
-		hash1 := hashToken("secret", "user1", 1000, 0)
-		hash2 := hashToken("secret", "user1", 1000, 0)
-		assert.Equal(t, hash1, hash2)
-	})
-
-	t.Run("Different secrets produce different hashes", func(t *testing.T) {
-		hash1 := hashToken("secret1", "user1", 1000, 0)
-		hash2 := hashToken("secret2", "user1", 1000, 0)
-		assert.NotEqual(t, hash1, hash2)
-	})
-
-	t.Run("Different timestamps produce different hashes", func(t *testing.T) {
-		hash1 := hashToken("secret", "user1", 1000, 0)
-		hash2 := hashToken("secret", "user1", 2000, 0)
-		assert.NotEqual(t, hash1, hash2)
-	})
-
-	t.Run("Different counters produce different hashes", func(t *testing.T) {
-		hash1 := hashToken("secret", "user1", 1000, 0)
-		hash2 := hashToken("secret", "user1", 1000, 1)
-		assert.NotEqual(t, hash1, hash2)
-	})
-
-	t.Run("Hash is correct length", func(t *testing.T) {
-		hash := hashToken("secret", "user1", 1000, 0)
-		assert.Len(t, hash, model.TokenSize)
-	})
-}
-
-func TestHashString(t *testing.T) {
-	t.Run("Same string produces same hash", func(t *testing.T) {
-		hash1 := hashString("test")
-		hash2 := hashString("test")
-		assert.Equal(t, hash1, hash2)
-	})
-
-	t.Run("Different strings produce different hashes", func(t *testing.T) {
-		hash1 := hashString("test1")
-		hash2 := hashString("test2")
-		assert.NotEqual(t, hash1, hash2)
-	})
-
-	t.Run("Hash is always positive", func(t *testing.T) {
-		hash := hashString("test")
-		assert.GreaterOrEqual(t, hash, 0)
 	})
 }
 

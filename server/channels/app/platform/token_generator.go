@@ -4,9 +4,6 @@
 package platform
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
-	"fmt"
 	"sync"
 	"time"
 
@@ -175,18 +172,8 @@ func DefaultTokenGeneratorConfig() *TokenGeneratorConfig {
 	}
 }
 
-// hashToken creates a deterministic hash from the given inputs
-// Used internally for cache key generation and token validation
-func hashToken(secret, userID string, timestamp int64, counter int) string {
-	h := sha256.New()
-	data := fmt.Sprintf("%s:%s:%d:%d", secret, userID, timestamp, counter)
-	h.Write([]byte(data))
-	hash := h.Sum(nil)
-	return base64.URLEncoding.EncodeToString(hash)[:model.TokenSize]
-}
-
 // quantizeTimestamp rounds a timestamp to the nearest interval
-// This improves cache efficiency by grouping tokens into time buckets
+// This is used for cache bucket management (not for token generation)
 func quantizeTimestamp(timestamp int64, quantizeMinutes int) int64 {
 	if quantizeMinutes <= 0 {
 		return timestamp
