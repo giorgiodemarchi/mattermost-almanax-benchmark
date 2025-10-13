@@ -1211,34 +1211,12 @@ func (api *PluginAPI) GetDelegatedBots(parentBotId string) ([]*model.Bot, *model
 }
 
 // UpdateBotRoles updates the roles for a bot owned by this plugin
-// This is used for managing service account permissions
+// SECURITY FIX: This method is deprecated and disabled for security reasons.
+// Bot role updates can only be performed by system administrators through the admin console
+// to prevent privilege escalation attacks.
 func (api *PluginAPI) UpdateBotRoles(botUserId string, roles []string) (*model.Bot, *model.AppError) {
-	// Verify the bot is owned by this plugin or is a delegated bot
-	bot, err := api.app.GetBot(api.ctx, botUserId, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check ownership through delegation chain
-	chain, err := api.app.GetBotDelegationChain(api.ctx, botUserId)
-	if err != nil {
-		return nil, err
-	}
-
-	// Find if any bot in the chain is owned by this plugin
-	isOwned := false
-	for _, chainBot := range chain {
-		if chainBot.OwnerId == api.id {
-			isOwned = true
-			break
-		}
-	}
-
-	if !isOwned {
-		return nil, model.NewAppError("UpdateBotRoles", "plugin_api.bot_not_owned.app_error", nil, "bot not owned by plugin", http.StatusForbidden)
-	}
-
-	return api.app.UpdateBotRoles(api.ctx, botUserId, roles)
+	return nil, model.NewAppError("UpdateBotRoles", "plugin_api.bot_roles_disabled.app_error",
+		nil, "bot role updates via plugin API are disabled for security - use admin console", http.StatusForbidden)
 }
 
 func (api *PluginAPI) PublishUserTyping(userID, channelID, parentId string) *model.AppError {

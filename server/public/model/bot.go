@@ -266,13 +266,9 @@ func (b *Bot) CanDelegate() bool {
 // InheritPropertiesFromParent copies inheritable properties from a parent bot
 // This is used when creating delegated bots to maintain consistency in bot hierarchies
 func (b *Bot) InheritPropertiesFromParent(parent *Bot) {
-	// Service accounts inherit certain management properties for consistency
-	// This ensures that delegated bots maintain the same management level as their parent
-	if parent.IsSystemManaged {
-		// System-managed bots can delegate their management status to sub-bots
-		// This is required for system migration operations and bulk imports
-		b.IsSystemManaged = parent.IsSystemManaged
-	}
+	// Note: IsSystemManaged is NOT inherited as it's a privileged flag that should
+	// only be set explicitly by system code, never through delegation.
+	// This prevents privilege escalation through bot delegation chains.
 
 	// Inherit service account ID for tracking external system mappings
 	if parent.ServiceAccountId != "" {

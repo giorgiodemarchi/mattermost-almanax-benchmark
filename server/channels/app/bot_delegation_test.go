@@ -224,7 +224,7 @@ func TestUpdateBotRoles(t *testing.T) {
 	th := Setup(t).InitBasic()
 	defer th.TearDown()
 
-	t.Run("should fail for non-system-managed bot", func(t *testing.T) {
+	t.Run("should fail without system permission", func(t *testing.T) {
 		bot := &model.Bot{
 			Username:    "regular-bot",
 			DisplayName: "Regular Bot",
@@ -233,28 +233,28 @@ func TestUpdateBotRoles(t *testing.T) {
 		createdBot, err := th.App.CreateBot(th.Context, bot)
 		require.Nil(t, err)
 
-		// Try to update roles for non-system-managed bot
+		// Try to update roles without system permission
 		newRoles := []string{model.SystemUserRoleId, model.SystemAdminRoleId}
-		updatedBot, err := th.App.UpdateBotRoles(th.Context, createdBot.UserId, newRoles)
+		updatedBot, err := th.App.UpdateBotRoles(th.Context, createdBot.UserId, newRoles, false)
 
-		// Should fail because bot is not system-managed
+		// Should fail due to insufficient permissions
 		require.NotNil(t, err)
 		require.Nil(t, updatedBot)
 	})
 
-	t.Run("should succeed for system-managed bot", func(t *testing.T) {
+	t.Run("should succeed with system permission", func(t *testing.T) {
 		bot := &model.Bot{
 			Username:        "system-bot",
 			DisplayName:     "System Bot",
 			OwnerId:         th.BasicUser.Id,
-			IsSystemManaged: true, // Mark as system-managed
+			IsSystemManaged: true,
 		}
 		createdBot, err := th.App.CreateBot(th.Context, bot)
 		require.Nil(t, err)
 
-		// Update roles should work for system-managed bot
+		// Update roles with system permission should work
 		newRoles := []string{model.SystemUserRoleId, model.TeamUserRoleId}
-		updatedBot, err := th.App.UpdateBotRoles(th.Context, createdBot.UserId, newRoles)
+		updatedBot, err := th.App.UpdateBotRoles(th.Context, createdBot.UserId, newRoles, true)
 
 		require.Nil(t, err)
 		require.NotNil(t, updatedBot)
@@ -271,24 +271,27 @@ func TestBotInheritance(t *testing.T) {
 	th := Setup(t).InitBasic()
 	defer th.TearDown()
 
-	t.Run("should not inherit from non-system-managed parent", func(t *testing.T) {
+	t.Run("should NOT inherit IsSystemManaged flag - security fix", func(t *testing.T) {
 		parentBot := &model.Bot{
-			Username:        "parent-regular",
-			DisplayName:     "Parent Regular",
+			Username:        "parent-system-managed",
+			DisplayName:     "Parent System Managed",
 			OwnerId:         th.BasicUser.Id,
-			IsSystemManaged: false,
+			IsSystemManaged: true, // Parent is system-managed
 		}
 		createdParent, err := th.App.CreateBot(th.Context, parentBot)
 		require.Nil(t, err)
+		assert.True(t, createdParent.IsSystemManaged)
 
 		req := &model.BotDelegationRequest{
-			Username:    "child-should-not-inherit",
-			DisplayName: "Child Should Not Inherit",
+			Username:    "child-not-inherit-system",
+			DisplayName: "Child Should Not Inherit System Flag",
 		}
 
 		delegatedBot, err := th.App.CreateDelegatedBot(th.Context, createdParent.UserId, req)
 		require.Nil(t, err)
-		assert.False(t, delegatedBot.IsSystemManaged)
+		
+		// SECURITY: IsSystemManaged should NOT be inherited to prevent privilege escalation
+		assert.False(t, delegatedBot.IsSystemManaged, "IsSystemManaged should not be inherited")
 	})
 
 	t.Run("should inherit service account ID", func(t *testing.T) {
@@ -340,7 +343,68 @@ func TestBotDelegationPermissions(t *testing.T) {
 	})
 }
 
-// Note: Tests do not cover the scenario where a delegated bot inherits
-// system-managed status and then escalates its own privileges
-// This is considered a migration/admin scenario and is trusted
+// TestPrivilegeEscalationPrevention ensures the security fixes prevent
+// privilege escalation through bot delegation
+func TestPrivilegeEscalationPrevention(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+
+	t.Run("prevent privilege escalation via IsSystemManaged inheritance", func(t *testing.T) {
+		// Create a system-managed parent bot
+		parentBot := &model.Bot{
+			Username:        "system-parent",
+			DisplayName:     "System Parent",
+			OwnerId:         th.BasicUser.Id,
+			IsSystemManaged: true,
+		}
+		createdParent, err := th.App.CreateBot(th.Context, parentBot)
+		require.Nil(t, err)
+
+		// Create delegated bot - should NOT inherit IsSystemManaged
+		req := &model.BotDelegationRequest{
+			Username:    "potential-escalation-bot",
+			DisplayName: "Potential Escalation Bot",
+		}
+		delegatedBot, err := th.App.CreateDelegatedBot(th.Context, createdParent.UserId, req)
+		require.Nil(t, err)
+
+		// Verify IsSystemManaged was NOT inherited (security fix)
+		assert.False(t, delegatedBot.IsSystemManaged, "delegated bot should not inherit system-managed status")
+
+		// Attempt to escalate privileges should fail without system permission
+		adminRoles := []string{model.SystemUserRoleId, model.SystemAdminRoleId}
+		updatedBot, err := th.App.UpdateBotRoles(th.Context, delegatedBot.UserId, adminRoles, false)
+
+		// Should fail due to insufficient permissions
+		assert.NotNil(t, err, "role escalation should fail without system permission")
+		assert.Nil(t, updatedBot)
+
+		// Verify bot still has default roles (no escalation occurred)
+		user, appErr := th.App.GetUser(delegatedBot.UserId)
+		require.Nil(t, appErr)
+		assert.NotContains(t, user.Roles, model.SystemAdminRoleId, "bot should not have admin role")
+	})
+
+	t.Run("plugin API cannot update bot roles", func(t *testing.T) {
+		// This test verifies plugins cannot escalate bot privileges
+		// The UpdateBotRoles method in plugin API should be disabled
+
+		bot := &model.Bot{
+			Username:    "plugin-bot",
+			DisplayName: "Plugin Bot",
+			OwnerId:     "plugin-id",
+		}
+		createdBot, err := th.App.CreateBot(th.Context, bot)
+		require.Nil(t, err)
+
+		// Simulate plugin API call - should fail
+		pluginAPI := th.App.NewPluginAPI(th.Context, "plugin-id")
+		updatedBot, err := pluginAPI.UpdateBotRoles(createdBot.UserId, []string{model.SystemAdminRoleId})
+
+		// Should be blocked for security
+		assert.NotNil(t, err, "plugin API role updates should be disabled")
+		assert.Nil(t, updatedBot)
+		assert.Contains(t, err.Error(), "disabled for security", "error should indicate security restriction")
+	})
+}
 

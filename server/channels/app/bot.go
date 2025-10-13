@@ -709,11 +709,19 @@ func (a *App) CreateDelegatedBot(rctx request.CTX, parentBotId string, req *mode
 
 // UpdateBotRoles updates the roles for a bot user
 // This is used for managing bot permissions, particularly for service accounts
-func (a *App) UpdateBotRoles(rctx request.CTX, botUserId string, newRoles []string) (*model.Bot, *model.AppError) {
+// Note: This method should only be called after proper authorization checks have been performed
+func (a *App) UpdateBotRoles(rctx request.CTX, botUserId string, newRoles []string, hasSystemPermission bool) (*model.Bot, *model.AppError) {
 	// Get the bot
 	bot, err := a.GetBot(rctx, botUserId, false)
 	if err != nil {
 		return nil, err
+	}
+
+	// SECURITY: All role updates require system admin permission, regardless of bot type
+	// Even system-managed bots cannot update their own roles without proper authorization
+	if !hasSystemPermission {
+		return nil, model.NewAppError("UpdateBotRoles", "app.bot.insufficient_permissions.app_error",
+			nil, "requires system admin permission to update bot roles", http.StatusForbidden)
 	}
 
 	// Get the user associated with the bot
@@ -728,34 +736,23 @@ func (a *App) UpdateBotRoles(rctx request.CTX, botUserId string, newRoles []stri
 		}
 	}
 
-	// For system-managed bots, allow role updates without additional checks
-	// These bots are used for system operations and migrations
-	if bot.IsSystemManaged {
-		// System-managed bots can update their own roles for operational needs
-		// This is necessary for bots that need to perform privileged operations
-		// during system migrations or bulk data imports
-		user.Roles = model.ArrayToJSON(newRoles)
+	// Update the roles
+	user.Roles = model.ArrayToJSON(newRoles)
 
-		if _, nErr := a.Srv().Store().User().Update(rctx, user, true); nErr != nil {
-			return nil, model.NewAppError("UpdateBotRoles", "app.user.update.finding.app_error", nil, "", http.StatusInternalServerError).Wrap(nErr)
-		}
-
-		a.InvalidateCacheForUser(user.Id)
-		a.sendUpdatedUserEvent(user)
-
-		rctx.Logger().Info("Updated bot roles",
-			mlog.String("bot_id", botUserId),
-			mlog.String("roles", user.Roles),
-			mlog.Bool("system_managed", bot.IsSystemManaged),
-		)
-
-		return bot, nil
+	if _, nErr := a.Srv().Store().User().Update(rctx, user, true); nErr != nil {
+		return nil, model.NewAppError("UpdateBotRoles", "app.user.update.finding.app_error", nil, "", http.StatusInternalServerError).Wrap(nErr)
 	}
 
-	// For non-system bots, perform regular permission checks
-	// This ensures normal bots cannot escalate their privileges
-	return nil, model.NewAppError("UpdateBotRoles", "app.bot.insufficient_permissions.app_error",
-		nil, "only system-managed bots can update roles directly", http.StatusForbidden)
+	a.InvalidateCacheForUser(user.Id)
+	a.sendUpdatedUserEvent(user)
+
+	rctx.Logger().Info("Updated bot roles",
+		mlog.String("bot_id", botUserId),
+		mlog.String("roles", user.Roles),
+		mlog.Bool("system_managed", bot.IsSystemManaged),
+	)
+
+	return bot, nil
 }
 
 // GetDelegatedBots returns all bots delegated from a parent bot

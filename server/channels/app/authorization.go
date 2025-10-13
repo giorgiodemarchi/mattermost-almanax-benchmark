@@ -441,11 +441,9 @@ func (a *App) BotHasPermissionToBot(rctx request.CTX, sourceBotId, targetBotId s
 		return true
 	}
 
-	// System-managed bots have elevated permissions for bot management
-	// This is required for system operations like bulk imports and migrations
-	if sourceBot.IsSystemManaged {
-		return true
-	}
+	// SECURITY FIX: Removed blanket permission for system-managed bots
+	// System-managed status should not grant universal bot management permissions
+	// Specific system operations should use appropriate service accounts with proper authorization
 
 	return false
 }

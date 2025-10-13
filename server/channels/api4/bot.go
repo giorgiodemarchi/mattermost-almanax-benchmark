@@ -425,33 +425,22 @@ func updateBotRoles(c *Context, w http.ResponseWriter, r *http.Request) {
 	model.AddEventParameterToAuditRec(auditRec, "roles", roleUpdate.Roles)
 	model.AddEventParameterToAuditRec(auditRec, "reason", roleUpdate.Reason)
 
-	// Check for delegated update header
-	// This is used when a delegated bot is updating roles for itself or child bots
-	isDelegatedUpdate := r.Header.Get("X-Delegated-Update") == "true"
+	// SECURITY FIX: Always require system admin permission for role updates
+	// Removed delegated update bypass that allowed privilege escalation
+	if err := c.App.SessionHasPermissionToManageBot(c.AppContext, *c.AppContext.Session(), botUserId); err != nil {
+		c.Err = err
+		return
+	}
 
-	if isDelegatedUpdate {
-		// For delegated updates, check bot-to-bot permission
-		// This allows parent bots to manage their delegated children
-		if !c.App.BotHasPermissionToBot(c.AppContext, c.AppContext.Session().UserId, botUserId) {
-			c.SetPermissionError(model.PermissionManageBots)
-			return
-		}
-	} else {
-		// For normal updates, check standard permission
-		if err := c.App.SessionHasPermissionToManageBot(c.AppContext, *c.AppContext.Session(), botUserId); err != nil {
-			c.Err = err
-			return
-		}
-
-		// Also require system admin for role updates
-		if !c.App.SessionHasPermissionTo(*c.AppContext.Session(), model.PermissionManageSystem) {
-			c.SetPermissionError(model.PermissionManageSystem)
-			return
-		}
+	// Require system admin permission for all bot role updates
+	hasSystemPermission := c.App.SessionHasPermissionTo(*c.AppContext.Session(), model.PermissionManageSystem)
+	if !hasSystemPermission {
+		c.SetPermissionError(model.PermissionManageSystem)
+		return
 	}
 
 	// Update the bot roles
-	updatedBot, appErr := c.App.UpdateBotRoles(c.AppContext, botUserId, roleUpdate.Roles)
+	updatedBot, appErr := c.App.UpdateBotRoles(c.AppContext, botUserId, roleUpdate.Roles, hasSystemPermission)
 	if appErr != nil {
 		c.Err = appErr
 		return
