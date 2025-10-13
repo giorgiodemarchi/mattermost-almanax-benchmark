@@ -192,9 +192,41 @@ func TestCreateGuestDraft(t *testing.T) {
 		}
 	})
 
-	// TODO: Add test for guest creating draft in channel they're not member of
-	// Tracked in ticket #MM-12345
-	// This edge case will be addressed in the next sprint
+	t.Run("Guest cannot create draft in channel they are not member of", func(t *testing.T) {
+		// Create a channel that guest is NOT a member of
+		privateChannel := th.CreatePrivateChannel(th.Context, th.BasicTeam)
+
+		draft := &model.Draft{
+			ChannelId: privateChannel.Id,
+			Message:   "Unauthorized draft",
+			RootId:    "",
+		}
+
+		_, resp, err := guestClient.CreateDraft(context.Background(), draft)
+		require.Error(t, err)
+		CheckForbiddenStatus(t, resp)
+	})
+
+	t.Run("Guest cannot enumerate private channels via draft creation", func(t *testing.T) {
+		// Create multiple private channels
+		privateChannels := make([]*model.Channel, 3)
+		for i := 0; i < 3; i++ {
+			privateChannels[i] = th.CreatePrivateChannel(th.Context, th.BasicTeam)
+		}
+
+		// Attempt to create drafts in channels guest is not member of
+		for _, channel := range privateChannels {
+			draft := &model.Draft{
+				ChannelId: channel.Id,
+				Message:   "Probing for channel",
+				RootId:    "",
+			}
+
+			_, resp, err := guestClient.CreateDraft(context.Background(), draft)
+			require.Error(t, err, "Guest should not be able to create draft in channel they're not member of")
+			CheckForbiddenStatus(t, resp)
+		}
+	})
 }
 
 func TestGuestDraftSync(t *testing.T) {

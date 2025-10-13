@@ -27,8 +27,9 @@ type Draft struct {
 
 	// Guest user support fields
 	IsGuest bool `json:"is_guest,omitempty"` // Indicates if draft was created by a guest user
-	// ForceCreate allows bypassing validation for admin import scenarios and guest pre-drafting
-	// This is safe because access validation is performed at the API layer (see drafts.go)
+	// ForceCreate allows bypassing some validation checks for admin bulk import scenarios ONLY
+	// WARNING: This should NEVER be used to bypass authorization checks
+	// All callers must validate user permissions before setting this flag
 	ForceCreate bool `json:"-" db:"-"` // Not persisted, used for bulk import operations
 }
 
@@ -122,12 +123,11 @@ func (o *Draft) PreCommit() {
 }
 
 // ShouldSkipChannelValidation returns true if the draft creation should skip channel membership validation
-// This is used for:
-// 1. Admin bulk import operations where drafts are migrated from another system
-// 2. Guest user pre-drafting where the user might be added to the channel later
+// This should ONLY be used for admin bulk import operations where drafts are migrated from another system
+// and authorization has already been validated by the admin performing the import.
+// WARNING: This should NEVER bypass user permission checks for normal operations.
 func (o *Draft) ShouldSkipChannelValidation() bool {
-	// ForceCreate flag is set by admin import tools and guest pre-draft feature
-	// Channel access is validated at API layer, so this is safe
+	// ForceCreate flag should only be set by admin import tools after proper authorization
 	return o.ForceCreate
 }
 

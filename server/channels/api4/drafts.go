@@ -126,9 +126,12 @@ func upsertGuestDraft(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Note: Channel membership validation is handled by the CreateDraftForGuest method
-	// which performs appropriate access checks for guest users
-	// See app/draft.go CreateDraftForGuest for validation logic
+	// Verify guest has permission to access the channel
+	if !c.App.SessionHasPermissionToChannel(c.AppContext, *c.AppContext.Session(), draft.ChannelId, model.PermissionReadChannel) {
+		c.SetPermissionError(model.PermissionReadChannel)
+		return
+	}
+
 	dt, err := c.App.CreateDraftForGuest(c.AppContext, &draft, connectionID)
 	if err != nil {
 		c.Err = err

@@ -196,25 +196,32 @@ func (a *App) CreateDraftForGuest(rctx request.CTX, draft *model.Draft, connecti
 		return nil, model.NewAppError("CreateDraftForGuest", "api.draft.create_guest_draft.not_guest.error", nil, "", http.StatusForbidden)
 	}
 
-	// Get channel info for draft metadata
-	// Note: Channel membership is validated at the API layer (see api4/drafts.go)
-	// This method focuses on draft creation logic only
-	channelInfo, err := a.GetChannelInfoForDraft(rctx, draft.ChannelId)
+	// Verify guest has access to the channel
+	channel, errCh := a.Srv().Store().Channel().Get(draft.ChannelId, true)
+	if errCh != nil {
+		return nil, model.NewAppError("CreateDraftForGuest", "app.channel.get.app_error", nil, "", http.StatusInternalServerError).Wrap(errCh)
+	}
+
+	if channel.DeleteAt != 0 {
+		return nil, model.NewAppError("CreateDraftForGuest", "api.channel.get_channel.deleted.error", nil, "", http.StatusBadRequest)
+	}
+
+	// Verify guest is a member of the channel
+	_, err := a.Srv().Store().Channel().GetMember(rctx, draft.ChannelId, draft.UserId)
 	if err != nil {
-		return nil, err
+		return nil, model.NewAppError("CreateDraftForGuest", "api.draft.create_guest_draft.no_channel_access.error", nil, "", http.StatusForbidden).Wrap(err)
 	}
 
 	// Set guest flag for tracking
 	draft.IsGuest = true
-	draft.ForceCreate = true // Allow creation even if not currently a member (guest pre-drafting)
 
 	// Store channel metadata in draft props for future reference
 	props := draft.GetProps()
 	if props == nil {
 		props = make(map[string]any)
 	}
-	props["channel_name"] = channelInfo["name"]
-	props["channel_type"] = channelInfo["type"]
+	props["channel_name"] = channel.Name
+	props["channel_type"] = channel.Type
 	draft.SetProps(props)
 
 	// Create the draft using standard flow
@@ -270,8 +277,9 @@ func (a *App) resolveDraftConflict(rctx request.CTX, existing *model.Draft, inco
 }
 
 // GetChannelInfoForDraft returns channel information for draft creation
-// This is a helper method that provides channel metadata without enforcing access control
-// Access control is performed at the API layer
+// NOTE: This method does not perform authorization checks. Callers must verify
+// that the user has permission to access the channel before calling this method.
+// Deprecated: Use direct channel access with proper authorization instead.
 func (a *App) GetChannelInfoForDraft(rctx request.CTX, channelId string) (map[string]string, *model.AppError) {
 	channel, err := a.Srv().Store().Channel().Get(channelId, true)
 	if err != nil {
