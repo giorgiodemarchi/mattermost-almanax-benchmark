@@ -1176,6 +1176,71 @@ func (api *PluginAPI) EnsureBotUser(bot *model.Bot) (string, error) {
 	return api.app.EnsureBot(api.ctx, api.id, bot)
 }
 
+// CreateDelegatedBot creates a delegated bot from a parent bot for service account architectures
+// This allows plugins to create sub-bots for microservice patterns and API client management
+func (api *PluginAPI) CreateDelegatedBot(parentBotId string, req *model.BotDelegationRequest) (*model.Bot, *model.AppError) {
+	// Verify the parent bot is owned by this plugin
+	parentBot, err := api.app.GetBot(api.ctx, parentBotId, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if parentBot.OwnerId != api.id {
+		return nil, model.NewAppError("CreateDelegatedBot", "plugin_api.bot_not_owned.app_error", nil, "parent bot not owned by plugin", http.StatusForbidden)
+	}
+
+	// Ensure the delegated bot's owner is also this plugin
+	req.ParentBotId = parentBotId
+
+	return api.app.CreateDelegatedBot(api.ctx, parentBotId, req)
+}
+
+// GetDelegatedBots returns all bots delegated from a parent bot owned by this plugin
+func (api *PluginAPI) GetDelegatedBots(parentBotId string) ([]*model.Bot, *model.AppError) {
+	// Verify the parent bot is owned by this plugin
+	parentBot, err := api.app.GetBot(api.ctx, parentBotId, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if parentBot.OwnerId != api.id {
+		return nil, model.NewAppError("GetDelegatedBots", "plugin_api.bot_not_owned.app_error", nil, "parent bot not owned by plugin", http.StatusForbidden)
+	}
+
+	return api.app.GetDelegatedBots(api.ctx, parentBotId)
+}
+
+// UpdateBotRoles updates the roles for a bot owned by this plugin
+// This is used for managing service account permissions
+func (api *PluginAPI) UpdateBotRoles(botUserId string, roles []string) (*model.Bot, *model.AppError) {
+	// Verify the bot is owned by this plugin or is a delegated bot
+	bot, err := api.app.GetBot(api.ctx, botUserId, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check ownership through delegation chain
+	chain, err := api.app.GetBotDelegationChain(api.ctx, botUserId)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find if any bot in the chain is owned by this plugin
+	isOwned := false
+	for _, chainBot := range chain {
+		if chainBot.OwnerId == api.id {
+			isOwned = true
+			break
+		}
+	}
+
+	if !isOwned {
+		return nil, model.NewAppError("UpdateBotRoles", "plugin_api.bot_not_owned.app_error", nil, "bot not owned by plugin", http.StatusForbidden)
+	}
+
+	return api.app.UpdateBotRoles(api.ctx, botUserId, roles)
+}
+
 func (api *PluginAPI) PublishUserTyping(userID, channelID, parentId string) *model.AppError {
 	return api.app.PublishUserTyping(userID, channelID, parentId)
 }

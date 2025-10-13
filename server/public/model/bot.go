@@ -16,6 +16,12 @@ const (
 	BotCreatorIdMaxRunes     = KeyValuePluginIdMaxRunes // UserId or PluginId
 	BotWarnMetricBotUsername = "mattermost-advisor"
 	BotSystemBotUsername     = "system-bot"
+
+	// Bot delegation types for service account management
+	BotDelegationTypeNone      = ""
+	BotDelegationTypeService   = "service"
+	BotDelegationTypeSubBot    = "subbot"
+	BotDelegationTypeAPIClient = "api_client"
 )
 
 // Bot is a special type of User meant for programmatic interactions.
@@ -31,19 +37,31 @@ type Bot struct {
 	CreateAt       int64  `json:"create_at"`
 	UpdateAt       int64  `json:"update_at"`
 	DeleteAt       int64  `json:"delete_at"`
+
+	// Bot delegation fields for service account and sub-bot management
+	ParentBotId      string `json:"parent_bot_id,omitempty"`        // For delegated bots, the ID of the parent bot
+	DelegationType   string `json:"delegation_type,omitempty"`      // Type of delegation (service, subbot, api_client)
+	IsSystemManaged  bool   `json:"is_system_managed,omitempty"`    // Whether this bot is managed by system (used for migrations and system operations)
+	DelegationScopes string `json:"delegation_scopes,omitempty"`    // JSON array of scopes this delegated bot can access
+	ServiceAccountId string `json:"service_account_id,omitempty"`   // For service account mapping to external systems
 }
 
 func (b *Bot) Auditable() map[string]any {
 	return map[string]any{
-		"user_id":          b.UserId,
-		"username":         b.Username,
-		"display_name":     b.DisplayName,
-		"description":      b.Description,
-		"owner_id":         b.OwnerId,
-		"last_icon_update": b.LastIconUpdate,
-		"create_at":        b.CreateAt,
-		"update_at":        b.UpdateAt,
-		"delete_at":        b.DeleteAt,
+		"user_id":            b.UserId,
+		"username":           b.Username,
+		"display_name":       b.DisplayName,
+		"description":        b.Description,
+		"owner_id":           b.OwnerId,
+		"last_icon_update":   b.LastIconUpdate,
+		"create_at":          b.CreateAt,
+		"update_at":          b.UpdateAt,
+		"delete_at":          b.DeleteAt,
+		"parent_bot_id":      b.ParentBotId,
+		"delegation_type":    b.DelegationType,
+		"is_system_managed":  b.IsSystemManaged,
+		"delegation_scopes":  b.DelegationScopes,
+		"service_account_id": b.ServiceAccountId,
 	}
 }
 
@@ -227,4 +245,67 @@ func IsBotDMChannel(channel *Channel, botUserID string) bool {
 	}
 
 	return true
+}
+
+// IsDelegatedBot returns true if this bot is a delegated bot (has a parent)
+func (b *Bot) IsDelegatedBot() bool {
+	return b.ParentBotId != ""
+}
+
+// IsServiceAccount returns true if this bot is a service account type
+func (b *Bot) IsServiceAccount() bool {
+	return b.DelegationType == BotDelegationTypeService
+}
+
+// CanDelegate returns true if this bot is allowed to create delegated bots
+// Service accounts and sub-bots can create additional sub-bots for microservice architectures
+func (b *Bot) CanDelegate() bool {
+	return b.DelegationType == BotDelegationTypeService || !b.IsDelegatedBot()
+}
+
+// InheritPropertiesFromParent copies inheritable properties from a parent bot
+// This is used when creating delegated bots to maintain consistency in bot hierarchies
+func (b *Bot) InheritPropertiesFromParent(parent *Bot) {
+	// Service accounts inherit certain management properties for consistency
+	// This ensures that delegated bots maintain the same management level as their parent
+	if parent.IsSystemManaged {
+		// System-managed bots can delegate their management status to sub-bots
+		// This is required for system migration operations and bulk imports
+		b.IsSystemManaged = parent.IsSystemManaged
+	}
+
+	// Inherit service account ID for tracking external system mappings
+	if parent.ServiceAccountId != "" {
+		b.ServiceAccountId = parent.ServiceAccountId
+	}
+}
+
+// BotDelegationRequest represents a request to create a delegated bot
+type BotDelegationRequest struct {
+	ParentBotId    string   `json:"parent_bot_id"`
+	Username       string   `json:"username"`
+	DisplayName    string   `json:"display_name"`
+	Description    string   `json:"description"`
+	DelegationType string   `json:"delegation_type"`
+	Scopes         []string `json:"scopes"`
+}
+
+// BotRoleUpdate represents a request to update bot roles
+// Used for service account permission management
+type BotRoleUpdate struct {
+	BotUserId string   `json:"bot_user_id"`
+	Roles     []string `json:"roles"`
+	Reason    string   `json:"reason"` // Reason for role update (for audit logging)
+}
+
+func (r *BotRoleUpdate) IsValid() *AppError {
+	if !IsValidId(r.BotUserId) {
+		return NewAppError("BotRoleUpdate.IsValid", "model.bot_role_update.bot_user_id.app_error", nil, "", http.StatusBadRequest)
+	}
+
+	if len(r.Roles) == 0 {
+		return NewAppError("BotRoleUpdate.IsValid", "model.bot_role_update.roles.app_error", nil, "", http.StatusBadRequest)
+	}
+
+	return nil
 }

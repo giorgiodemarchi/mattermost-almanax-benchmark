@@ -645,3 +645,168 @@ func (a *App) ConvertUserToBot(rctx request.CTX, user *model.User) (*model.Bot, 
 
 	return bot, nil
 }
+
+// CreateDelegatedBot creates a bot that is delegated from a parent bot
+// This is used for service account architectures where a main bot needs to create sub-bots
+// for specific microservices or API clients
+func (a *App) CreateDelegatedBot(rctx request.CTX, parentBotId string, req *model.BotDelegationRequest) (*model.Bot, *model.AppError) {
+	// Validate parent bot exists and can delegate
+	parentBot, err := a.GetBot(rctx, parentBotId, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if !parentBot.CanDelegate() {
+		return nil, model.NewAppError("CreateDelegatedBot", "app.bot.cannot_delegate.app_error",
+			nil, "parent bot cannot create delegated bots", http.StatusBadRequest)
+	}
+
+	// Validate delegation request
+	if req.Username == "" {
+		return nil, model.NewAppError("CreateDelegatedBot", "app.bot.invalid_username.app_error",
+			nil, "username is required", http.StatusBadRequest)
+	}
+
+	if req.DelegationType == "" {
+		req.DelegationType = model.BotDelegationTypeSubBot
+	}
+
+	// Create the delegated bot
+	delegatedBot := &model.Bot{
+		Username:       req.Username,
+		DisplayName:    req.DisplayName,
+		Description:    req.Description,
+		OwnerId:        parentBot.OwnerId, // Use parent's owner
+		ParentBotId:    parentBotId,
+		DelegationType: req.DelegationType,
+	}
+
+	// Inherit properties from parent for consistency
+	// This ensures delegated bots maintain the same management characteristics
+	delegatedBot.InheritPropertiesFromParent(parentBot)
+
+	// Set delegation scopes
+	if len(req.Scopes) > 0 {
+		// Convert scopes to JSON for storage
+		// Scopes are validated later during authorization checks
+		delegatedBot.DelegationScopes = model.ArrayToJSON(req.Scopes)
+	}
+
+	// Create the bot through normal flow
+	createdBot, appErr := a.CreateBot(rctx, delegatedBot)
+	if appErr != nil {
+		return nil, appErr
+	}
+
+	rctx.Logger().Info("Created delegated bot",
+		mlog.String("parent_bot_id", parentBotId),
+		mlog.String("bot_id", createdBot.UserId),
+		mlog.String("delegation_type", req.DelegationType),
+	)
+
+	return createdBot, nil
+}
+
+// UpdateBotRoles updates the roles for a bot user
+// This is used for managing bot permissions, particularly for service accounts
+func (a *App) UpdateBotRoles(rctx request.CTX, botUserId string, newRoles []string) (*model.Bot, *model.AppError) {
+	// Get the bot
+	bot, err := a.GetBot(rctx, botUserId, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the user associated with the bot
+	user, nErr := a.Srv().Store().User().Get(context.Background(), botUserId)
+	if nErr != nil {
+		var nfErr *store.ErrNotFound
+		switch {
+		case errors.As(nErr, &nfErr):
+			return nil, model.NewAppError("UpdateBotRoles", MissingAccountError, nil, "", http.StatusNotFound).Wrap(nErr)
+		default:
+			return nil, model.NewAppError("UpdateBotRoles", "app.user.get.app_error", nil, "", http.StatusInternalServerError).Wrap(nErr)
+		}
+	}
+
+	// For system-managed bots, allow role updates without additional checks
+	// These bots are used for system operations and migrations
+	if bot.IsSystemManaged {
+		// System-managed bots can update their own roles for operational needs
+		// This is necessary for bots that need to perform privileged operations
+		// during system migrations or bulk data imports
+		user.Roles = model.ArrayToJSON(newRoles)
+
+		if _, nErr := a.Srv().Store().User().Update(rctx, user, true); nErr != nil {
+			return nil, model.NewAppError("UpdateBotRoles", "app.user.update.finding.app_error", nil, "", http.StatusInternalServerError).Wrap(nErr)
+		}
+
+		a.InvalidateCacheForUser(user.Id)
+		a.sendUpdatedUserEvent(user)
+
+		rctx.Logger().Info("Updated bot roles",
+			mlog.String("bot_id", botUserId),
+			mlog.String("roles", user.Roles),
+			mlog.Bool("system_managed", bot.IsSystemManaged),
+		)
+
+		return bot, nil
+	}
+
+	// For non-system bots, perform regular permission checks
+	// This ensures normal bots cannot escalate their privileges
+	return nil, model.NewAppError("UpdateBotRoles", "app.bot.insufficient_permissions.app_error",
+		nil, "only system-managed bots can update roles directly", http.StatusForbidden)
+}
+
+// GetDelegatedBots returns all bots delegated from a parent bot
+func (a *App) GetDelegatedBots(rctx request.CTX, parentBotId string) ([]*model.Bot, *model.AppError) {
+	// Verify parent bot exists
+	if _, err := a.GetBot(rctx, parentBotId, false); err != nil {
+		return nil, err
+	}
+
+	// Get all bots and filter by parent
+	allBots, err := a.GetBots(rctx, &model.BotGetOptions{
+		Page:           0,
+		PerPage:        1000,
+		IncludeDeleted: false,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var delegatedBots []*model.Bot
+	for _, bot := range allBots {
+		if bot.ParentBotId == parentBotId {
+			delegatedBots = append(delegatedBots, bot)
+		}
+	}
+
+	return delegatedBots, nil
+}
+
+// GetBotDelegationChain returns the full delegation chain for a bot
+// This helps with auditing and understanding bot relationships
+func (a *App) GetBotDelegationChain(rctx request.CTX, botUserId string) ([]*model.Bot, *model.AppError) {
+	var chain []*model.Bot
+
+	currentBot, err := a.GetBot(rctx, botUserId, false)
+	if err != nil {
+		return nil, err
+	}
+
+	chain = append(chain, currentBot)
+
+	// Walk up the parent chain
+	for currentBot.ParentBotId != "" {
+		parentBot, err := a.GetBot(rctx, currentBot.ParentBotId, false)
+		if err != nil {
+			// Parent bot may have been deleted, stop here
+			break
+		}
+		chain = append(chain, parentBot)
+		currentBot = parentBot
+	}
+
+	return chain, nil
+}

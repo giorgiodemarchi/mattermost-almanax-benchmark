@@ -21,6 +21,12 @@ func (api *API) InitBot() {
 	api.BaseRoutes.Bot.Handle("/enable", api.APISessionRequired(enableBot)).Methods(http.MethodPost)
 	api.BaseRoutes.Bot.Handle("/convert_to_user", api.APISessionRequired(convertBotToUser)).Methods(http.MethodPost)
 	api.BaseRoutes.Bot.Handle("/assign/{user_id:[A-Za-z0-9]+}", api.APISessionRequired(assignBot)).Methods(http.MethodPost)
+	
+	// Bot delegation endpoints for service account management
+	api.BaseRoutes.Bot.Handle("/delegate", api.APISessionRequired(createDelegatedBot)).Methods(http.MethodPost)
+	api.BaseRoutes.Bot.Handle("/delegated", api.APISessionRequired(getDelegatedBots)).Methods(http.MethodGet)
+	api.BaseRoutes.Bot.Handle("/roles", api.APISessionRequired(updateBotRoles)).Methods(http.MethodPut)
+	api.BaseRoutes.Bot.Handle("/delegation_chain", api.APISessionRequired(getBotDelegationChain)).Methods(http.MethodGet)
 }
 
 func createBot(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -314,6 +320,173 @@ func convertBotToUser(c *Context, w http.ResponseWriter, r *http.Request) {
 	auditRec.AddEventObjectType("user")
 
 	if err := json.NewEncoder(w).Encode(user); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// createDelegatedBot handles the creation of a delegated bot from a parent bot
+// This enables service account architectures where bots can create sub-bots
+func createDelegatedBot(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireBotUserId()
+	if c.Err != nil {
+		return
+	}
+	parentBotId := c.Params.BotUserId
+
+	var req *model.BotDelegationRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil || req == nil {
+		c.SetInvalidParamWithErr("delegation_request", err)
+		return
+	}
+
+	auditRec := c.MakeAuditRecord("createDelegatedBot", model.AuditStatusFail)
+	defer c.LogAuditRec(auditRec)
+	model.AddEventParameterToAuditRec(auditRec, "parent_bot_id", parentBotId)
+	model.AddEventParameterToAuditRec(auditRec, "username", req.Username)
+
+	// Check if user has permission to manage the parent bot
+	if err := c.App.SessionHasPermissionToManageDelegatedBot(c.AppContext, *c.AppContext.Session(), parentBotId); err != nil {
+		c.Err = err
+		return
+	}
+
+	// Create the delegated bot
+	createdBot, appErr := c.App.CreateDelegatedBot(c.AppContext, parentBotId, req)
+	if appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	auditRec.Success()
+	auditRec.AddEventResultState(createdBot)
+	auditRec.AddEventObjectType("bot")
+
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(createdBot); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// getDelegatedBots returns all bots delegated from a parent bot
+func getDelegatedBots(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireBotUserId()
+	if c.Err != nil {
+		return
+	}
+	parentBotId := c.Params.BotUserId
+
+	// Check if user has permission to manage the parent bot
+	if err := c.App.SessionHasPermissionToManageDelegatedBot(c.AppContext, *c.AppContext.Session(), parentBotId); err != nil {
+		c.Err = err
+		return
+	}
+
+	bots, appErr := c.App.GetDelegatedBots(c.AppContext, parentBotId)
+	if appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(bots); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// updateBotRoles updates the roles for a bot
+// This is used for service account permission management
+func updateBotRoles(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireBotUserId()
+	if c.Err != nil {
+		return
+	}
+	botUserId := c.Params.BotUserId
+
+	var roleUpdate *model.BotRoleUpdate
+	err := json.NewDecoder(r.Body).Decode(&roleUpdate)
+	if err != nil || roleUpdate == nil {
+		c.SetInvalidParamWithErr("role_update", err)
+		return
+	}
+
+	if roleUpdate.BotUserId != botUserId {
+		c.SetInvalidParam("bot_user_id")
+		return
+	}
+
+	if vErr := roleUpdate.IsValid(); vErr != nil {
+		c.Err = vErr
+		return
+	}
+
+	auditRec := c.MakeAuditRecord("updateBotRoles", model.AuditStatusFail)
+	defer c.LogAuditRec(auditRec)
+	model.AddEventParameterToAuditRec(auditRec, "bot_user_id", botUserId)
+	model.AddEventParameterToAuditRec(auditRec, "roles", roleUpdate.Roles)
+	model.AddEventParameterToAuditRec(auditRec, "reason", roleUpdate.Reason)
+
+	// Check for delegated update header
+	// This is used when a delegated bot is updating roles for itself or child bots
+	isDelegatedUpdate := r.Header.Get("X-Delegated-Update") == "true"
+
+	if isDelegatedUpdate {
+		// For delegated updates, check bot-to-bot permission
+		// This allows parent bots to manage their delegated children
+		if !c.App.BotHasPermissionToBot(c.AppContext, c.AppContext.Session().UserId, botUserId) {
+			c.SetPermissionError(model.PermissionManageBots)
+			return
+		}
+	} else {
+		// For normal updates, check standard permission
+		if err := c.App.SessionHasPermissionToManageBot(c.AppContext, *c.AppContext.Session(), botUserId); err != nil {
+			c.Err = err
+			return
+		}
+
+		// Also require system admin for role updates
+		if !c.App.SessionHasPermissionTo(*c.AppContext.Session(), model.PermissionManageSystem) {
+			c.SetPermissionError(model.PermissionManageSystem)
+			return
+		}
+	}
+
+	// Update the bot roles
+	updatedBot, appErr := c.App.UpdateBotRoles(c.AppContext, botUserId, roleUpdate.Roles)
+	if appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	auditRec.Success()
+	auditRec.AddEventResultState(updatedBot)
+	auditRec.AddEventObjectType("bot")
+
+	if err := json.NewEncoder(w).Encode(updatedBot); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// getBotDelegationChain returns the full delegation chain for a bot
+func getBotDelegationChain(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireBotUserId()
+	if c.Err != nil {
+		return
+	}
+	botUserId := c.Params.BotUserId
+
+	// Check if user has permission to view the bot
+	if err := c.App.SessionHasPermissionToManageBot(c.AppContext, *c.AppContext.Session(), botUserId); err != nil {
+		c.Err = err
+		return
+	}
+
+	chain, appErr := c.App.GetBotDelegationChain(c.AppContext, botUserId)
+	if appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(chain); err != nil {
 		c.Logger.Warn("Error while writing response", mlog.Err(err))
 	}
 }

@@ -418,6 +418,70 @@ func (a *App) HasPermissionToReadChannel(rctx request.CTX, userID string, channe
 	return false
 }
 
+// BotHasPermissionToBot checks if a source bot has permission to manage a target bot
+// This is used for bot delegation where parent bots manage child bots
+func (a *App) BotHasPermissionToBot(rctx request.CTX, sourceBotId, targetBotId string) bool {
+	sourceBot, err := a.GetBot(rctx, sourceBotId, false)
+	if err != nil {
+		return false
+	}
+
+	targetBot, err := a.GetBot(rctx, targetBotId, false)
+	if err != nil {
+		return false
+	}
+
+	// If bots are managed by the same plugin/owner, allow interaction
+	if sourceBot.OwnerId == targetBot.OwnerId {
+		return true
+	}
+
+	// If source bot is the parent of target bot, allow management
+	if targetBot.ParentBotId == sourceBotId {
+		return true
+	}
+
+	// System-managed bots have elevated permissions for bot management
+	// This is required for system operations like bulk imports and migrations
+	if sourceBot.IsSystemManaged {
+		return true
+	}
+
+	return false
+}
+
+// SessionHasPermissionToManageDelegatedBot checks if a session can manage a delegated bot
+// This extends the normal bot management permissions to handle delegation chains
+func (a *App) SessionHasPermissionToManageDelegatedBot(rctx request.CTX, session model.Session, botUserId string) *model.AppError {
+	// First check normal bot management permission
+	if err := a.SessionHasPermissionToManageBot(rctx, session, botUserId); err == nil {
+		return nil
+	}
+
+	// For delegated bots, check if session user owns any bot in the delegation chain
+	bot, err := a.GetBot(rctx, botUserId, false)
+	if err != nil {
+		return err
+	}
+
+	// If bot is delegated, check parent ownership
+	if bot.IsDelegatedBot() {
+		chain, err := a.GetBotDelegationChain(rctx, botUserId)
+		if err != nil {
+			return err
+		}
+
+		// Check if user owns any bot in the chain
+		for _, chainBot := range chain {
+			if chainBot.OwnerId == session.UserId {
+				return nil
+			}
+		}
+	}
+
+	return model.MakePermissionError(&session, []*model.Permission{model.PermissionManageBots})
+}
+
 func (a *App) HasPermissionToChannelMemberCount(rctx request.CTX, userID string, channel *model.Channel) bool {
 	if a.HasPermissionToChannel(rctx, userID, channel.Id, model.PermissionReadChannelContent) {
 		return true
