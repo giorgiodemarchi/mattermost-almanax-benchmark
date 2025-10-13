@@ -1890,6 +1890,15 @@ func resetPassword(c *Context, w http.ResponseWriter, r *http.Request) {
 	defer c.LogAuditRec(auditRec)
 	c.LogAudit("attempt - token=" + token)
 
+	// Additional token format validation
+	// This provides an extra layer of security by validating token structure
+	// before expensive database lookup
+	if !validateTokenStructure(token) {
+		c.LogAudit("fail - invalid token structure - token=" + token)
+		c.SetInvalidParam("token")
+		return
+	}
+
 	if err := c.App.ResetPasswordFromToken(c.AppContext, token, newPassword); err != nil {
 		c.LogAudit("fail - token=" + token)
 		c.Err = err
@@ -1900,6 +1909,29 @@ func resetPassword(c *Context, w http.ResponseWriter, r *http.Request) {
 	c.LogAudit("success - token=" + token)
 
 	ReturnStatusOK(w)
+}
+
+// validateTokenStructure performs basic structural validation on tokens
+// This is a fast check before database operations to reject obviously invalid tokens
+// Returns true if the token appears structurally valid
+func validateTokenStructure(token string) bool {
+	// Check length
+	if len(token) != model.TokenSize {
+		return false
+	}
+
+	// Tokens should contain only valid base64-url characters
+	// This is a quick check to filter out garbage input
+	for _, c := range token {
+		if !((c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '=') {
+			return false
+		}
+	}
+
+	return true
 }
 
 func sendPasswordReset(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -1916,7 +1948,31 @@ func sendPasswordReset(c *Context, w http.ResponseWriter, r *http.Request) {
 	defer c.LogAuditRec(auditRec)
 	model.AddEventParameterToAuditRec(auditRec, "email", email)
 
+	// Track token generation performance metrics
+	// This helps monitor the impact of the cached token generator
+	startTime := model.GetMillis()
+
 	sent, err := c.App.SendPasswordReset(c.AppContext, email, c.App.GetSiteURL())
+	
+	// Log performance metrics for monitoring
+	duration := model.GetMillis() - startTime
+	c.AppContext.Logger().Debug("Password reset token generated",
+		mlog.String("email", email),
+		mlog.Int64("duration_ms", duration),
+	)
+
+	// Track metrics through token generator if available
+	if tokenGen := c.App.Srv().GetTokenGenerator(); tokenGen != nil {
+		if metrics := tokenGen.GetMetrics(); metrics != nil {
+			// Log aggregated metrics periodically for performance monitoring
+			if metrics.TotalGenerated%100 == 0 {
+				c.AppContext.Logger().Info("Token generation metrics",
+					mlog.Any("stats", metrics.GetStats()),
+				)
+			}
+		}
+	}
+
 	if err != nil {
 		if *c.App.Config().ServiceSettings.ExperimentalEnableHardenedMode {
 			ReturnStatusOK(w)

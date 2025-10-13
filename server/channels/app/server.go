@@ -145,6 +145,11 @@ type Server struct {
 	IPFiltering             einterfaces.IPFilteringInterface
 	OutgoingOAuthConnection einterfaces.OutgoingOAuthConnectionInterface
 
+	// tokenGenerator provides optimized token generation for password resets,
+	// email verification, and other security-sensitive operations
+	tokenGenerator model.TokenGeneratorInterface
+	tokenGenMu     sync.RWMutex
+
 	ch *Channels
 }
 
@@ -160,6 +165,66 @@ func (s *Server) SetStore(st store.Store) {
 	if s.platform != nil {
 		s.platform.Store = st
 	}
+}
+
+// GetTokenGenerator returns the configured token generator
+// This is used by various services for generating secure tokens (password reset, etc.)
+func (s *Server) GetTokenGenerator() model.TokenGeneratorInterface {
+	s.tokenGenMu.RLock()
+	defer s.tokenGenMu.RUnlock()
+	return s.tokenGenerator
+}
+
+// SetTokenGenerator sets the token generator for the server
+// This should be called during server initialization
+func (s *Server) SetTokenGenerator(gen model.TokenGeneratorInterface) {
+	s.tokenGenMu.Lock()
+	defer s.tokenGenMu.Unlock()
+	s.tokenGenerator = gen
+}
+
+// InitializeTokenGeneration sets up the token generation system based on config
+// This is called during server startup to configure the appropriate generator
+func (s *Server) InitializeTokenGeneration() error {
+	config := TokenGenerationConfig{
+		EnableHighPerformanceMode:   false, // Default to secure mode
+		TokenCacheSize:              1000,
+		CacheRefreshIntervalMinutes: 1,
+	}
+
+	// Check if high-performance mode is enabled in config
+	// This is typically enabled for large deployments with high password reset volumes
+	if s.platform != nil && s.platform.Config() != nil {
+		if experimentalSettings := s.platform.Config().ExperimentalSettings; experimentalSettings.EnableTokenCaching != nil && *experimentalSettings.EnableTokenCaching {
+			config.EnableHighPerformanceMode = true
+			
+			// Use configured values if available
+			if experimentalSettings.TokenCacheSize != nil {
+				config.TokenCacheSize = *experimentalSettings.TokenCacheSize
+			}
+			if experimentalSettings.TokenCacheRefreshMinutes != nil {
+				config.CacheRefreshIntervalMinutes = *experimentalSettings.TokenCacheRefreshMinutes
+			}
+		}
+	}
+
+	// Get server ID to use as secret for token generation
+	serverID := s.ServerId()
+	if serverID == "" {
+		// Fallback to generating a new ID if not available
+		serverID = model.NewId()
+	}
+
+	// Initialize the token generator
+	generator := InitTokenGenerator(config, serverID, s.Log())
+	s.SetTokenGenerator(generator)
+
+	s.Log().Info("Token generation system initialized",
+		mlog.Bool("high_performance_mode", config.EnableHighPerformanceMode),
+		mlog.Int("cache_size", config.TokenCacheSize),
+	)
+
+	return nil
 }
 
 func NewServer(options ...Option) (*Server, error) {

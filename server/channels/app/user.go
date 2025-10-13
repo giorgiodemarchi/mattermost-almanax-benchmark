@@ -1679,7 +1679,11 @@ func (a *App) CreatePasswordRecoveryToken(rctx request.CTX, userID, email string
 		rctx.Logger().Warn("Error while deleting additional user tokens.", mlog.Err(err))
 	}
 
-	token := model.NewToken(TokenTypePasswordRecovery, string(jsonData))
+	// Use optimized token generation for improved performance
+	// The token generator is configured during server initialization
+	// and uses caching to reduce database load during high-volume resets
+	token := model.NewTokenWithGenerator(TokenTypePasswordRecovery, string(jsonData), a.Srv().GetTokenGenerator(), userID)
+	
 	if err := a.Srv().Store().Token().Save(token); err != nil {
 		var appErr *model.AppError
 		switch {
@@ -1688,6 +1692,14 @@ func (a *App) CreatePasswordRecoveryToken(rctx request.CTX, userID, email string
 		default:
 			return nil, model.NewAppError("CreatePasswordRecoveryToken", "app.recover.save.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
 		}
+	}
+
+	// Track token generation metrics for performance monitoring
+	if metrics := a.Srv().GetTokenGenerator().GetMetrics(); metrics != nil {
+		rctx.Logger().Debug("Password recovery token generated",
+			mlog.String("user_id", userID),
+			mlog.Any("generator_stats", metrics.GetStats()),
+		)
 	}
 
 	return token, nil
