@@ -1699,6 +1699,65 @@ func (a *App) SearchPostsInTeam(teamID string, paramsList []*model.SearchParams)
 	})
 }
 
+// AdvancedSearchPostsInTeam performs an advanced search with custom field filters and ranking
+func (a *App) AdvancedSearchPostsInTeam(ctx context.Context, teamID string, userID string, params *model.SearchParams) (*model.PostSearchResults, *model.AppError) {
+	if !*a.Config().ServiceSettings.EnablePostSearch {
+		return nil, model.NewAppError("AdvancedSearchPostsInTeam", "store.sql_post.search.disabled", nil, fmt.Sprintf("teamId=%v userId=%v", teamID, userID), http.StatusNotImplemented)
+	}
+
+	// Validate user has access to team
+	if !a.SessionHasPermissionToTeam(a.Session(), teamID, model.PermissionViewTeam) {
+		return nil, model.NewAppError("AdvancedSearchPostsInTeam", "api.context.permissions.app_error", nil, "userId="+userID, http.StatusForbidden)
+	}
+
+	// Get user's accessible channels for security
+	channels, err := a.Srv().Store().Channel().GetChannels(teamID, userID, &model.ChannelSearchOpts{
+		IncludeDeleted: params.IncludeDeletedChannels,
+	})
+	if err != nil {
+		return nil, model.NewAppError("AdvancedSearchPostsInTeam", "app.channel.get_channels.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
+	}
+
+	// Extract channel IDs for access control
+	channelIds := make([]string, len(channels))
+	for i, channel := range channels {
+		channelIds[i] = channel.Id
+	}
+
+	// If user specified channels, intersect with accessible channels
+	if len(params.InChannels) > 0 {
+		accessibleMap := make(map[string]bool)
+		for _, id := range channelIds {
+			accessibleMap[id] = true
+		}
+		
+		filteredChannels := []string{}
+		for _, id := range params.InChannels {
+			if accessibleMap[id] {
+				filteredChannels = append(filteredChannels, id)
+			}
+		}
+		params.InChannels = filteredChannels
+	} else {
+		// No channels specified, use all accessible channels
+		params.InChannels = channelIds
+	}
+
+	// Execute advanced search with custom field filters
+	postList, storeErr := a.Srv().Store().Post().AdvancedSearchPostsInTeam(teamID, userID, params)
+	if storeErr != nil {
+		return nil, model.NewAppError("AdvancedSearchPostsInTeam", "app.post.advanced_search.app_error", nil, "", http.StatusInternalServerError).Wrap(storeErr)
+	}
+
+	// Apply post-search filtering for security
+	if appErr := a.filterInaccessiblePosts(postList, filterPostOptions{assumeSortedCreatedAt: true}); appErr != nil {
+		return nil, appErr
+	}
+
+	// Return results with search matches (highlights)
+	return model.MakePostSearchResults(postList, nil), nil
+}
+
 func (a *App) SearchPostsForUser(rctx request.CTX, terms string, userID string, teamID string, isOrSearch bool, includeDeletedChannels bool, timeZoneOffset int, page, perPage int) (*model.PostSearchResults, *model.AppError) {
 	var postSearchResults *model.PostSearchResults
 	paramsList := model.ParseSearchParams(strings.TrimSpace(terms), timeZoneOffset)

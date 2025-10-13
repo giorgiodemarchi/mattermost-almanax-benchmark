@@ -2841,6 +2841,47 @@ func (s *SqlPostStore) SearchPostsForUser(rctx request.CTX, paramsList []*model.
 	return model.MakePostSearchResults(posts, nil), nil
 }
 
+// AdvancedSearchPostsInTeam executes an advanced post search with custom field filters and ranking
+// This method uses the SearchQueryBuilder for optimized query construction with JSON field support
+func (s *SqlPostStore) AdvancedSearchPostsInTeam(teamId string, userId string, params *model.SearchParams) (*model.PostList, error) {
+	list := model.NewPostList()
+
+	// Initialize the advanced search query builder
+	builder := NewSearchQueryBuilder(s)
+
+	// Build the optimized query with custom field filters
+	query, err := builder.BuildAdvancedSearchQuery(teamId, userId, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to build advanced search query")
+	}
+
+	// Convert to SQL
+	queryString, args, err := query.ToSql()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to convert query to SQL")
+	}
+
+	// Log query performance stats for monitoring
+	if s.logger != nil {
+		stats := builder.GetQueryPerformanceStats(queryString)
+		s.logger.Debug("Advanced search query stats", mlog.Any("stats", stats))
+	}
+
+	// Execute the query
+	var posts []*model.Post
+	if err := s.GetReplica().Select(&posts, queryString, args...); err != nil {
+		return nil, errors.Wrap(err, "failed to execute advanced search query")
+	}
+
+	// Populate the post list
+	for _, post := range posts {
+		list.AddPost(post)
+		list.AddOrder(post.Id)
+	}
+
+	return list, nil
+}
+
 func (s *SqlPostStore) GetOldestEntityCreationTime() (int64, error) {
 	query := s.getQueryBuilder().Select("MIN(min_createat) min_createat").
 		Suffix(`FROM (

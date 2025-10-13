@@ -36,6 +36,7 @@ func (api *API) InitPost() {
 
 	api.BaseRoutes.Team.Handle("/posts/search", api.APISessionRequiredDisableWhenBusy(searchPostsInTeam)).Methods(http.MethodPost)
 	api.BaseRoutes.Posts.Handle("/search", api.APISessionRequiredDisableWhenBusy(searchPostsInAllTeams)).Methods(http.MethodPost)
+	api.BaseRoutes.Team.Handle("/posts/search/advanced", api.APISessionRequiredDisableWhenBusy(advancedSearchPostsInTeam)).Methods(http.MethodPost)
 	api.BaseRoutes.Post.Handle("", api.APISessionRequired(updatePost)).Methods(http.MethodPut)
 	api.BaseRoutes.Post.Handle("/patch", api.APISessionRequired(patchPost)).Methods(http.MethodPut)
 	api.BaseRoutes.Post.Handle("/restore/{restore_version_id:[A-Za-z0-9]+}", api.APISessionRequired(restorePostVersion)).Methods(http.MethodPost)
@@ -763,6 +764,55 @@ func searchPostsInTeam(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	searchPosts(c, w, r, c.Params.TeamId)
+}
+
+func advancedSearchPostsInTeam(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireTeamId()
+	if c.Err != nil {
+		return
+	}
+
+	if !c.App.SessionHasPermissionToTeam(*c.AppContext.Session(), c.Params.TeamId, model.PermissionViewTeam) {
+		c.SetPermissionError(model.PermissionViewTeam)
+		return
+	}
+
+	var params model.SearchParams
+	if jsonErr := json.NewDecoder(r.Body).Decode(&params); jsonErr != nil {
+		c.Err = model.NewAppError("advancedSearchPostsInTeam", "api.post.advanced_search.invalid_body.app_error", nil, "", http.StatusBadRequest).Wrap(jsonErr)
+		return
+	}
+
+	// Validate custom field filters
+	if len(params.CustomFieldFilters) > 20 {
+		c.SetInvalidParamWithDetails("custom_field_filters", "maximum 20 filters allowed")
+		return
+	}
+
+	for _, filter := range params.CustomFieldFilters {
+		if filter.RawFieldPath == "" {
+			c.SetInvalidParamWithDetails("field_path", "field path cannot be empty")
+			return
+		}
+		// Basic operator validation
+		validOperators := map[string]bool{"equals": true, "contains": true, "gt": true, "lt": true, "in": true, "": true}
+		if !validOperators[filter.Operator] {
+			c.SetInvalidParamWithDetails("operator", "invalid operator: "+filter.Operator)
+			return
+		}
+	}
+
+	// Perform advanced search with custom field filters and ranking
+	results, err := c.App.AdvancedSearchPostsInTeam(c.AppContext.Context(), c.Params.TeamId, c.AppContext.Session().UserId, &params)
+	if err != nil {
+		c.Err = err
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	if err := json.NewEncoder(w).Encode(results); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
 }
 
 func searchPostsInAllTeams(c *Context, w http.ResponseWriter, r *http.Request) {

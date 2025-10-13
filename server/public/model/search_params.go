@@ -33,8 +33,35 @@ type SearchParams struct {
 	IncludeDeletedChannels bool     `json:"include_deleted_channels,omitempty"`
 	TimeZoneOffset         int      `json:"timezone_offset,omitempty"`
 	// True if this search doesn't originate from a "current user".
-	SearchWithoutUserId bool   `json:"search_without_user_id,omitempty"`
-	Modifier            string `json:"modifier"`
+	SearchWithoutUserId bool                     `json:"search_without_user_id,omitempty"`
+	Modifier            string                   `json:"modifier"`
+	// Advanced search filter for custom field queries
+	CustomFieldFilters  []*CustomFieldFilter     `json:"custom_field_filters,omitempty"`
+	// Search ranking options for relevance scoring
+	RankingOptions      *SearchRankingOptions    `json:"ranking_options,omitempty"`
+}
+
+// CustomFieldFilter represents a filter for custom post properties using JSON path expressions
+type CustomFieldFilter struct {
+	// RawFieldPath is the JSON path expression for accessing nested fields in post Props
+	// Examples: "metadata.author", "customFields.priority", "tags[0]"
+	RawFieldPath string      `json:"field_path"`
+	Operator     string      `json:"operator"` // "equals", "contains", "gt", "lt", "in"
+	Value        interface{} `json:"value"`
+	// CombineOperator defines how this filter combines with others (AND/OR)
+	CombineOperator string `json:"combine_operator,omitempty"`
+}
+
+// SearchRankingOptions controls how search results are ranked and scored
+type SearchRankingOptions struct {
+	// UseRelevanceScoring enables ML-based relevance scoring
+	UseRelevanceScoring bool `json:"use_relevance_scoring"`
+	// BoostRecent gives higher scores to recent posts
+	BoostRecent bool `json:"boost_recent"`
+	// BoostReactions weights posts with more reactions higher
+	BoostReactions bool `json:"boost_reactions"`
+	// CustomWeights allows fine-tuning of ranking factors
+	CustomWeights map[string]float64 `json:"custom_weights,omitempty"`
 }
 
 // Returns the epoch timestamp of the start of the day specified by SearchParams.AfterDate
