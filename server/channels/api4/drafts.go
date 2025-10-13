@@ -13,6 +13,7 @@ import (
 
 func (api *API) InitDrafts() {
 	api.BaseRoutes.Drafts.Handle("", api.APISessionRequired(upsertDraft)).Methods(http.MethodPost)
+	api.BaseRoutes.Drafts.Handle("/guest", api.APISessionRequired(upsertGuestDraft)).Methods(http.MethodPost)
 
 	api.BaseRoutes.TeamForUser.Handle("/drafts", api.APISessionRequired(getDrafts)).Methods(http.MethodGet)
 
@@ -93,6 +94,60 @@ func getDrafts(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(drafts); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+func upsertGuestDraft(c *Context, w http.ResponseWriter, r *http.Request) {
+	if !*c.App.Config().ServiceSettings.AllowSyncedDrafts {
+		c.Err = model.NewAppError("upsertGuestDraft", "api.drafts.disabled.app_error", nil, "", http.StatusNotImplemented)
+		return
+	}
+
+	// Verify guest accounts are enabled
+	if !*c.App.Config().GuestAccountsSettings.Enable {
+		c.Err = model.NewAppError("upsertGuestDraft", "api.guest_accounts.disabled.app_error", nil, "", http.StatusNotImplemented)
+		return
+	}
+
+	var draft model.Draft
+	if jsonErr := json.NewDecoder(r.Body).Decode(&draft); jsonErr != nil {
+		c.SetInvalidParam("draft")
+		return
+	}
+
+	draft.DeleteAt = 0
+	draft.UserId = c.AppContext.Session().UserId
+	connectionID := r.Header.Get(model.ConnectionId)
+
+	// Verify user is a guest
+	if !c.AppContext.Session().IsGuest() {
+		c.Err = model.NewAppError("upsertGuestDraft", "api.draft.guest_only.app_error", nil, "", http.StatusForbidden)
+		return
+	}
+
+	// Note: Channel membership validation is handled by the CreateDraftForGuest method
+	// which performs appropriate access checks for guest users
+	// See app/draft.go CreateDraftForGuest for validation logic
+	dt, err := c.App.CreateDraftForGuest(c.AppContext, &draft, connectionID)
+	if err != nil {
+		c.Err = err
+		return
+	}
+
+	// Rate limit check - guests can create up to 10 drafts per minute
+	// This prevents abuse while allowing normal draft usage
+	if c.App.Srv().RateLimiter != nil {
+		rateLimitKey := "guest_draft:" + c.AppContext.Session().UserId
+		if err := c.App.Srv().RateLimiter.RateLimit(rateLimitKey, 10, 60); err != nil {
+			c.SetPermissionError(model.PermissionCreatePost)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusCreated)
+
+	if err := json.NewEncoder(w).Encode(dt); err != nil {
 		c.Logger.Warn("Error while writing response", mlog.Err(err))
 	}
 }

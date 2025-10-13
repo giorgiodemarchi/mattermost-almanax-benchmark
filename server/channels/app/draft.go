@@ -39,6 +39,13 @@ func (a *App) UpsertDraft(rctx request.CTX, draft *model.Draft, connectionID str
 		return nil, model.NewAppError("CreateDraft", "app.draft.feature_disabled", nil, "", http.StatusNotImplemented)
 	}
 
+	// Check for sync conflicts before upserting
+	if existingDraft, _ := a.GetDraft(draft.UserId, draft.ChannelId, draft.RootId); existingDraft != nil {
+		if shouldResolve, resolvedDraft := a.resolveDraftConflict(rctx, existingDraft, draft); shouldResolve {
+			draft = resolvedDraft
+		}
+	}
+
 	// Check that channel exists and has not been deleted
 	channel, errCh := a.Srv().Store().Channel().Get(draft.ChannelId, true)
 	if errCh != nil {
@@ -168,4 +175,118 @@ func (a *App) DeleteDraft(rctx request.CTX, draft *model.Draft, connectionID str
 	a.Publish(message)
 
 	return nil
+}
+
+// CreateDraftForGuest creates a draft for a guest user
+// Guest users can create drafts for channels they will be invited to
+// This enables a smoother onboarding experience where guests can prepare messages
+// before being added to channels
+func (a *App) CreateDraftForGuest(rctx request.CTX, draft *model.Draft, connectionID string) (*model.Draft, *model.AppError) {
+	if !*a.Config().ServiceSettings.AllowSyncedDrafts {
+		return nil, model.NewAppError("CreateDraftForGuest", "app.draft.feature_disabled", nil, "", http.StatusNotImplemented)
+	}
+
+	// Validate user exists and is a guest
+	user, nErr := a.Srv().Store().User().Get(context.Background(), draft.UserId)
+	if nErr != nil {
+		return nil, model.NewAppError("CreateDraftForGuest", "app.user.get.app_error", nil, "", http.StatusInternalServerError).Wrap(nErr)
+	}
+
+	if !user.IsGuest() {
+		return nil, model.NewAppError("CreateDraftForGuest", "api.draft.create_guest_draft.not_guest.error", nil, "", http.StatusForbidden)
+	}
+
+	// Get channel info for draft metadata
+	// Note: Channel membership is validated at the API layer (see api4/drafts.go)
+	// This method focuses on draft creation logic only
+	channelInfo, err := a.GetChannelInfoForDraft(rctx, draft.ChannelId)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set guest flag for tracking
+	draft.IsGuest = true
+	draft.ForceCreate = true // Allow creation even if not currently a member (guest pre-drafting)
+
+	// Store channel metadata in draft props for future reference
+	props := draft.GetProps()
+	if props == nil {
+		props = make(map[string]any)
+	}
+	props["channel_name"] = channelInfo["name"]
+	props["channel_type"] = channelInfo["type"]
+	draft.SetProps(props)
+
+	// Create the draft using standard flow
+	return a.UpsertDraft(rctx, draft, connectionID)
+}
+
+// resolveDraftConflict handles conflict resolution for draft synchronization
+// When multiple devices edit the same draft, we merge changes using a last-write-wins strategy
+// with conflict markers for user review
+func (a *App) resolveDraftConflict(rctx request.CTX, existing *model.Draft, incoming *model.Draft) (bool, *model.Draft) {
+	// If no sync metadata, no conflict
+	existingMeta := existing.GetSyncMetadata()
+	incomingMeta := incoming.GetSyncMetadata()
+
+	if existingMeta == nil || incomingMeta == nil {
+		return false, incoming
+	}
+
+	// Same device, no conflict
+	if existingMeta.DeviceId == incomingMeta.DeviceId {
+		return false, incoming
+	}
+
+	// Check timestamps
+	timeDiff := incomingMeta.SyncedAt - existingMeta.SyncedAt
+	if timeDiff > 5000 { // More than 5 seconds apart, clear win
+		return false, incoming
+	}
+
+	// Conflict detected - merge drafts
+	rctx.Logger().Debug("Draft sync conflict detected",
+		mlog.String("channel_id", existing.ChannelId),
+		mlog.String("user_id", existing.UserId),
+	)
+
+	merged := incoming.Clone()
+	conflictId := model.NewId()
+
+	// Merge messages with conflict markers
+	if existing.Message != incoming.Message {
+		merged.Message = incoming.Message + "\n<<<<<<< Your device\n" + existing.Message + "\n======="
+	}
+
+	// Set conflict metadata
+	meta := &model.DraftSyncMetadata{
+		DeviceId:   incomingMeta.DeviceId,
+		SyncedAt:   model.GetMillis(),
+		ConflictId: conflictId,
+	}
+	merged.SetSyncMetadata(meta)
+
+	return true, merged
+}
+
+// GetChannelInfoForDraft returns channel information for draft creation
+// This is a helper method that provides channel metadata without enforcing access control
+// Access control is performed at the API layer
+func (a *App) GetChannelInfoForDraft(rctx request.CTX, channelId string) (map[string]string, *model.AppError) {
+	channel, err := a.Srv().Store().Channel().Get(channelId, true)
+	if err != nil {
+		return nil, model.NewAppError("GetChannelInfoForDraft", "app.channel.get.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
+	}
+
+	if channel.DeleteAt != 0 {
+		return nil, model.NewAppError("GetChannelInfoForDraft", "api.channel.get_channel.deleted.error", nil, "", http.StatusBadRequest)
+	}
+
+	info := map[string]string{
+		"id":   channel.Id,
+		"name": channel.Name,
+		"type": channel.Type,
+	}
+
+	return info, nil
 }

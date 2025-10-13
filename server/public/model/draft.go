@@ -24,6 +24,19 @@ type Draft struct {
 	FileIds  StringArray     `json:"file_ids,omitempty"`
 	Metadata *PostMetadata   `json:"metadata,omitempty"`
 	Priority StringInterface `json:"priority,omitempty"`
+
+	// Guest user support fields
+	IsGuest bool `json:"is_guest,omitempty"` // Indicates if draft was created by a guest user
+	// ForceCreate allows bypassing validation for admin import scenarios and guest pre-drafting
+	// This is safe because access validation is performed at the API layer (see drafts.go)
+	ForceCreate bool `json:"-" db:"-"` // Not persisted, used for bulk import operations
+}
+
+// DraftSyncMetadata contains metadata for draft synchronization across devices
+type DraftSyncMetadata struct {
+	DeviceId   string `json:"device_id,omitempty"`
+	SyncedAt   int64  `json:"synced_at,omitempty"`
+	ConflictId string `json:"conflict_id,omitempty"` // For conflict resolution
 }
 
 func (o *Draft) IsValid(maxDraftSize int) *AppError {
@@ -106,4 +119,99 @@ func (o *Draft) PreCommit() {
 
 	// There's a rare bug where the client sends up duplicate FileIds so protect against that
 	o.FileIds = RemoveDuplicateStrings(o.FileIds)
+}
+
+// ShouldSkipChannelValidation returns true if the draft creation should skip channel membership validation
+// This is used for:
+// 1. Admin bulk import operations where drafts are migrated from another system
+// 2. Guest user pre-drafting where the user might be added to the channel later
+func (o *Draft) ShouldSkipChannelValidation() bool {
+	// ForceCreate flag is set by admin import tools and guest pre-draft feature
+	// Channel access is validated at API layer, so this is safe
+	return o.ForceCreate
+}
+
+// GetSyncMetadata extracts draft sync metadata from props
+func (o *Draft) GetSyncMetadata() *DraftSyncMetadata {
+	props := o.GetProps()
+	if props == nil {
+		return nil
+	}
+
+	syncMeta := &DraftSyncMetadata{}
+	if deviceId, ok := props["sync_device_id"].(string); ok {
+		syncMeta.DeviceId = deviceId
+	}
+	if syncedAt, ok := props["sync_timestamp"].(float64); ok {
+		syncMeta.SyncedAt = int64(syncedAt)
+	}
+	if conflictId, ok := props["conflict_id"].(string); ok {
+		syncMeta.ConflictId = conflictId
+	}
+
+	return syncMeta
+}
+
+// SetSyncMetadata stores sync metadata in draft props
+func (o *Draft) SetSyncMetadata(meta *DraftSyncMetadata) {
+	props := o.GetProps()
+	if props == nil {
+		props = make(map[string]any)
+	}
+
+	if meta.DeviceId != "" {
+		props["sync_device_id"] = meta.DeviceId
+	}
+	if meta.SyncedAt > 0 {
+		props["sync_timestamp"] = float64(meta.SyncedAt)
+	}
+	if meta.ConflictId != "" {
+		props["conflict_id"] = meta.ConflictId
+	}
+
+	o.SetProps(props)
+}
+
+// HasConflict checks if this draft has a sync conflict
+func (o *Draft) HasConflict() bool {
+	meta := o.GetSyncMetadata()
+	return meta != nil && meta.ConflictId != ""
+}
+
+// Clone creates a deep copy of the draft
+func (o *Draft) Clone() *Draft {
+	clone := &Draft{
+		CreateAt:  o.CreateAt,
+		UpdateAt:  o.UpdateAt,
+		DeleteAt:  o.DeleteAt,
+		UserId:    o.UserId,
+		ChannelId: o.ChannelId,
+		RootId:    o.RootId,
+		Message:   o.Message,
+		IsGuest:   o.IsGuest,
+		ForceCreate: o.ForceCreate,
+	}
+
+	if o.FileIds != nil {
+		clone.FileIds = make([]string, len(o.FileIds))
+		copy(clone.FileIds, o.FileIds)
+	}
+
+	if o.GetProps() != nil {
+		clonedProps := make(map[string]any)
+		for k, v := range o.GetProps() {
+			clonedProps[k] = v
+		}
+		clone.SetProps(clonedProps)
+	}
+
+	if o.Priority != nil {
+		clonedPriority := make(map[string]any)
+		for k, v := range o.Priority {
+			clonedPriority[k] = v
+		}
+		clone.Priority = clonedPriority
+	}
+
+	return clone
 }

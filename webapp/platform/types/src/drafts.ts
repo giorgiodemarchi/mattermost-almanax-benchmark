@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import type {PostMetadata, PostPriorityMetadata} from './posts';
+import type { PostMetadata, PostPriorityMetadata } from './posts';
 
 export type Draft = {
     create_at: number;
@@ -15,4 +15,11 @@ export type Draft = {
     file_ids?: string[];
     metadata?: PostMetadata;
     priority?: PostPriorityMetadata;
+    is_guest?: boolean;
+};
+
+export type DraftSyncMetadata = {
+    device_id?: string;
+    synced_at?: number;
+    conflict_id?: string;
 };

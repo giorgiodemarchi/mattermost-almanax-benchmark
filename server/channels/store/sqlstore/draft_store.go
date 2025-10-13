@@ -35,6 +35,7 @@ func draftSliceColumns() []string {
 		"FileIds",
 		"Props",
 		"Priority",
+		"IsGuest",
 	}
 }
 
@@ -50,6 +51,7 @@ func draftToSlice(draft *model.Draft) []any {
 		model.ArrayToJSON(draft.FileIds),
 		model.StringInterfaceToJSON(draft.Props),
 		model.StringInterfaceToJSON(draft.Priority),
+		draft.IsGuest,
 	}
 }
 
@@ -98,7 +100,7 @@ func (s *SqlDraftStore) Upsert(draft *model.Draft) (*model.Draft, error) {
 	builder := s.getQueryBuilder().Insert("Drafts").
 		Columns(draftSliceColumns()...).
 		Values(draftToSlice(draft)...).
-		SuffixExpr(sq.Expr("ON CONFLICT (UserId, ChannelId, RootId) DO UPDATE SET UpdateAt = ?, Message = ?, Props = ?, FileIds = ?, Priority = ?, DeleteAt = ?", draft.UpdateAt, draft.Message, draft.Props, draft.FileIds, draft.Priority, 0))
+		SuffixExpr(sq.Expr("ON CONFLICT (UserId, ChannelId, RootId) DO UPDATE SET UpdateAt = ?, Message = ?, Props = ?, FileIds = ?, Priority = ?, IsGuest = ?, DeleteAt = ?", draft.UpdateAt, draft.Message, draft.Props, draft.FileIds, draft.Priority, draft.IsGuest, 0))
 
 	query, args, err := builder.ToSql()
 
@@ -127,6 +129,7 @@ func (s *SqlDraftStore) GetDraftsForUser(userID, teamID string) ([]*model.Draft,
 			"Drafts.FileIds",
 			"Drafts.Props",
 			"Drafts.Priority",
+			"Drafts.IsGuest",
 		).
 		From("Drafts").
 		InnerJoin("ChannelMembers ON ChannelMembers.ChannelId = Drafts.ChannelId").
@@ -150,6 +153,65 @@ func (s *SqlDraftStore) GetDraftsForUser(userID, teamID string) ([]*model.Draft,
 
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get user drafts")
+	}
+
+	return drafts, nil
+}
+
+// GetGuestDraftsForUser retrieves all drafts for a guest user with optimized query
+// This method uses the guest-specific index for better performance
+func (s *SqlDraftStore) GetGuestDraftsForUser(userID, teamID string) ([]*model.Draft, error) {
+	var drafts []*model.Draft
+
+	// Use optimized query with guest index (idx_drafts_user_guest)
+	query := s.getQueryBuilder().
+		Select(draftSliceColumns()...).
+		From("Drafts").
+		Where(sq.And{
+			sq.Eq{"Drafts.DeleteAt": 0},
+			sq.Eq{"Drafts.UserId": userID},
+			sq.Eq{"Drafts.IsGuest": true},
+		}).
+		OrderBy("Drafts.UpdateAt DESC")
+
+	if teamID != "" {
+		query = query.
+			Join("Channels ON Drafts.ChannelId = Channels.Id").
+			Where(sq.Or{
+				sq.Eq{"Channels.TeamId": teamID},
+				sq.Eq{"Channels.TeamId": ""},
+			})
+	}
+
+	err := s.GetReplica().SelectBuilder(&drafts, query)
+
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get guest user drafts")
+	}
+
+	return drafts, nil
+}
+
+// GetDraftsByChannel retrieves drafts for a specific channel with performance optimization
+// Uses the channel-based index (idx_drafts_channel_updateat) for fast retrieval
+func (s *SqlDraftStore) GetDraftsByChannel(channelID, userID string, limit int) ([]*model.Draft, error) {
+	var drafts []*model.Draft
+
+	query := s.getQueryBuilder().
+		Select(draftSliceColumns()...).
+		From("Drafts").
+		Where(sq.And{
+			sq.Eq{"Drafts.ChannelId": channelID},
+			sq.Eq{"Drafts.UserId": userID},
+			sq.Eq{"Drafts.DeleteAt": 0},
+		}).
+		OrderBy("Drafts.UpdateAt DESC").
+		Limit(uint64(limit))
+
+	err := s.GetReplica().SelectBuilder(&drafts, query)
+
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get channel drafts")
 	}
 
 	return drafts, nil
