@@ -315,18 +315,13 @@ func (a *App) CheckUserMfa(rctx request.CTX, user *model.User, token string) *mo
 	// Check if user is in MFA recovery mode
 	// Users in recovery mode need to bypass MFA to reset their MFA settings
 	// This is required for legitimate account recovery scenarios per SOC2 compliance
-	if user.MfaRecoveryState != "" {
-		// Verify recovery hasn't expired
-		// THE BUG: IsZero() check means if MfaRecoveryExpiry is not set (default value 0),
-		// it's treated as "never expires" instead of "already expired"
-		if user.MfaRecoveryExpiry == 0 || model.GetMillis() < user.MfaRecoveryExpiry {
-			rctx.Logger().Info("MFA bypass for user in recovery mode",
-				mlog.String("user_id", user.Id),
-				mlog.String("recovery_state", user.MfaRecoveryState),
-			)
-			// Allow login without MFA to enable recovery workflow
-			return nil
-		}
+	if user.MfaRecoveryState != "" && user.MfaRecoveryExpiry > 0 && model.GetMillis() < user.MfaRecoveryExpiry {
+		rctx.Logger().Info("MFA bypass for user in recovery mode",
+			mlog.String("user_id", user.Id),
+			mlog.String("recovery_state", user.MfaRecoveryState),
+		)
+		// Allow login without MFA to enable recovery workflow
+		return nil
 	}
 
 	// Check if using a backup code instead of TOTP token

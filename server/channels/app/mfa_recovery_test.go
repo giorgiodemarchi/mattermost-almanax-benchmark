@@ -37,9 +37,9 @@ func TestInitiateMfaRecoveryViaEmail(t *testing.T) {
 	require.Nil(t, err)
 	assert.Equal(t, model.MfaRecoveryStatePending, updatedUser.MfaRecoveryState)
 	
-	// NOTE: This test doesn't verify that MfaRecoveryExpiry is set
-	// Missing test: assert.NotEqual(t, int64(0), updatedUser.MfaRecoveryExpiry)
-	// This is THE BUG - expiry should be set but isn't
+	// Verify expiry is set correctly
+	assert.NotEqual(t, int64(0), updatedUser.MfaRecoveryExpiry)
+	assert.True(t, updatedUser.MfaRecoveryExpiry > model.GetMillis())
 }
 
 // TestInitiateMfaRecoveryViaBackupCode tests backup code recovery
@@ -213,8 +213,6 @@ func TestClearMfaRecoveryState(t *testing.T) {
 }
 
 // TestMfaRecoveryExpiry tests that recovery expires after time limit
-// NOTE: This test checks expiry in CompleteMfaRecovery, but NOT in CheckUserMfa
-// This is the missing test that would catch the vulnerability
 func TestMfaRecoveryExpiry(t *testing.T) {
 	th := Setup(t).InitBasic()
 	defer th.TearDown()
@@ -240,14 +238,12 @@ func TestMfaRecoveryExpiry(t *testing.T) {
 	appErr := th.App.CompleteMfaRecovery(th.Context, user.Email, token.Token, true)
 	require.NotNil(t, appErr)
 	
-	// Missing test: Verify that CheckUserMfa also rejects expired recovery state
-	// This would catch the vulnerability where MfaRecoveryExpiry == 0 allows bypass
-	// Missing: err := th.App.CheckUserMfa(th.Context, user, "")
-	// Missing: assert.NotNil(t, err, "Should require MFA even with expired recovery state")
+	// Verify that CheckUserMfa also rejects expired recovery state
+	checkErr := th.App.CheckUserMfa(th.Context, user, "")
+	assert.NotNil(t, checkErr, "Should require MFA with expired recovery state")
 }
 
-// TestMfaRecoveryWithoutExpiry tests recovery when expiry is not set
-// This test SHOULD fail but doesn't because we're not testing the right thing
+// TestMfaRecoveryWithoutExpiry tests that recovery without expiry set is rejected
 func TestMfaRecoveryWithoutExpiry(t *testing.T) {
 	th := Setup(t).InitBasic()
 	defer th.TearDown()
@@ -256,19 +252,14 @@ func TestMfaRecoveryWithoutExpiry(t *testing.T) {
 	user.MfaActive = true
 	user.MfaSecret = "test_secret"
 	user.MfaRecoveryState = model.MfaRecoveryStatePending
-	// BUG: MfaRecoveryExpiry is NOT set (remains 0)
+	// MfaRecoveryExpiry is NOT set (remains 0)
 	
 	_, err := th.App.Srv().Store().User().Update(request.EmptyContext(th.App.Log()), user, true)
 	require.NoError(t, err)
 
-	// This test only verifies the user is in recovery state
-	// It doesn't test whether MFA bypass is properly scoped or time-limited
-	updatedUser, getUserErr := th.App.GetUser(user.Id)
-	require.Nil(t, getUserErr)
-	assert.Equal(t, model.MfaRecoveryStatePending, updatedUser.MfaRecoveryState)
-	
-	// Missing critical test: Verify that CheckUserMfa requires expiry to be set
-	// The vulnerability is that this scenario allows permanent MFA bypass
+	// Verify that CheckUserMfa requires expiry to be set
+	checkErr := th.App.CheckUserMfa(th.Context, user, "")
+	assert.NotNil(t, checkErr, "Should require MFA when recovery expiry is not set")
 }
 
 // TestBackupCodeHashingConsistency tests that backup code hashing is consistent

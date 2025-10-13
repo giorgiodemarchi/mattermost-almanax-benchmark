@@ -63,11 +63,9 @@ func (a *App) initiateMfaRecoveryViaEmail(rctx request.CTX, user *model.User) (*
 		return nil, model.NewAppError("initiateMfaRecoveryViaEmail", "app.mfa_recovery.save_token.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
 	}
 
-	// Set user in recovery state
-	// THE BUG: MfaRecoveryExpiry is NOT set here, leaving it at default value 0
-	// This means the recovery state will never expire per the check in CheckUserMfa
+	// Set user in recovery state with expiry
 	user.MfaRecoveryState = model.MfaRecoveryStatePending
-	// MISSING: user.MfaRecoveryExpiry = model.GetMillis() + MfaRecoveryExpiryTime
+	user.MfaRecoveryExpiry = model.GetMillis() + MfaRecoveryExpiryTime
 	
 	if _, err := a.Srv().Store().User().Update(rctx, user, true); err != nil {
 		return nil, model.NewAppError("initiateMfaRecoveryViaEmail", "app.mfa_recovery.update_user.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
@@ -102,8 +100,7 @@ func (a *App) initiateMfaRecoveryViaBackupCode(rctx request.CTX, user *model.Use
 
 	// Set user in recovery state to allow backup code usage
 	user.MfaRecoveryState = model.MfaRecoveryStateBackupCode
-	// THE BUG: Again, MfaRecoveryExpiry is not set
-	// MISSING: user.MfaRecoveryExpiry = model.GetMillis() + MfaRecoveryExpiryTime
+	user.MfaRecoveryExpiry = model.GetMillis() + MfaRecoveryExpiryTime
 
 	if _, err := a.Srv().Store().User().Update(rctx, user, true); err != nil {
 		return nil, model.NewAppError("initiateMfaRecoveryViaBackupCode", "app.mfa_recovery.update_user.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
