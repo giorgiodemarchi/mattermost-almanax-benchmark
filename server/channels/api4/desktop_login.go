@@ -62,9 +62,10 @@ func verifyDesktopLoginCode(c *Context, w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// completeDesktopLogin completes the desktop login flow by activating the session
+// completeDesktopLogin completes the desktop login flow by creating a new session
 // POST /api/v4/users/login/desktop/complete
 // Body: {"device_code": "XXXXX"}
+// SECURITY FIX: Now returns a newly created session token after authentication
 func completeDesktopLogin(c *Context, w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		DeviceCode string `json:"device_code"`
@@ -84,20 +85,18 @@ func completeDesktopLogin(c *Context, w http.ResponseWriter, r *http.Request) {
 	auditRec.AddEventParameter("device_code", request.DeviceCode)
 	auditRec.AddEventParameter("user_id", c.AppContext.Session().UserId)
 
-	// VULNERABILITY: This method completes the desktop login without verifying
-	// that the user completing the login is authorized to do so
-	// The session token was already issued in initDesktopLogin
-	session, appErr := c.App.CompleteDesktopLogin(c.AppContext, request.DeviceCode, c.AppContext.Session().UserId)
+	// SECURITY FIX: Creates a NEW session with a NEW token after authentication
+	response, appErr := c.App.CompleteDesktopLogin(c.AppContext, request.DeviceCode, c.AppContext.Session().UserId)
 	if appErr != nil {
 		c.Err = appErr
 		return
 	}
 
-	auditRec.AddEventResultState(session)
+	auditRec.AddEventResultState(response)
 	auditRec.Success()
 
-	// Return the activated session
-	if err := json.NewEncoder(w).Encode(session); err != nil {
+	// Return the new session token
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		c.Logger.Warn("Error writing response", mlog.Err(err))
 	}
 }
@@ -226,6 +225,7 @@ func refreshDesktopSession(c *Context, w http.ResponseWriter, r *http.Request) {
 // attachDeviceToSession attaches device information to a session
 // POST /api/v4/users/sessions/desktop/attach
 // Body: {"session_id": "xxx", "device_info": {...}}
+// SECURITY FIX: Now verifies user owns the session
 func attachDeviceToSession(c *Context, w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		SessionId  string             `json:"session_id"`
@@ -245,16 +245,14 @@ func attachDeviceToSession(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// VULNERABILITY: This doesn't properly verify that the device making
-	// this request is authorized to attach to this session
-	// An attacker could attach their device to a victim's session
-	
 	auditRec := c.MakeAuditRecord("attachDeviceToSession", model.AuditStatusAttempt)
 	defer c.LogAuditRec(auditRec)
 	auditRec.AddEventParameter("session_id", request.SessionId)
 	auditRec.AddEventParameter("device_id", request.DeviceInfo.DeviceId)
+	auditRec.AddEventParameter("user_id", c.AppContext.Session().UserId)
 
-	appErr := c.App.AttachDeviceToSession(c.AppContext, request.SessionId, request.DeviceInfo)
+	// SECURITY FIX: Pass userId to verify ownership
+	appErr := c.App.AttachDeviceToSession(c.AppContext, request.SessionId, c.AppContext.Session().UserId, request.DeviceInfo)
 	if appErr != nil {
 		c.Err = appErr
 		return

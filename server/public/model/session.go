@@ -326,6 +326,18 @@ type DeviceInfo struct {
 	OSVersion string `json:"os_version,omitempty"`
 }
 
+// DeviceCodeMetadata stores device code information before session creation
+// This prevents session fixation by not creating sessions before authentication
+type DeviceCodeMetadata struct {
+	DeviceCode     string `json:"device_code"`
+	DeviceName     string `json:"device_name"`
+	DevicePlatform string `json:"device_platform"`
+	AppVersion     string `json:"app_version"`
+	LoginMethod    string `json:"login_method"`
+	CreatedAt      int64  `json:"created_at"`
+	ExpiresAt      int64  `json:"expires_at"`
+}
+
 // IsPendingActivation returns true if the session is waiting for user authentication
 func (s *Session) IsPendingActivation() bool {
 	if s.Props == nil {

@@ -534,3 +534,141 @@ func (me SqlSessionStore) UpdateExpiresAt(rctx request.CTX, sessionId string, ex
 	}
 	return nil
 }
+
+// Device Code Metadata methods - SECURITY FIX
+// These store device codes WITHOUT creating sessions to prevent session fixation
+
+// StoreDeviceCodeMetadata stores device code metadata in a separate table-like structure
+// We use the Sessions table Props field but with a special marker to distinguish from real sessions
+func (me SqlSessionStore) StoreDeviceCodeMetadata(rctx request.CTX, metadata *model.DeviceCodeMetadata) error {
+	// Create a minimal "session" record that's really just metadata storage
+	// UserId is empty, and we mark it with a special device_code_metadata state
+	props := map[string]string{
+		model.SessionPropDeviceCode:     metadata.DeviceCode,
+		model.SessionPropDeviceName:     metadata.DeviceName,
+		model.SessionPropDevicePlatform: metadata.DevicePlatform,
+		model.SessionPropAppVersion:     metadata.AppVersion,
+		model.SessionPropLoginMethod:    metadata.LoginMethod,
+		model.SessionPropCreatedAt:      fmt.Sprintf("%d", metadata.CreatedAt),
+		model.SessionPropSessionState:   "device_code_metadata", // Special marker
+	}
+
+	jsonProps, err := json.Marshal(props)
+	if err != nil {
+		return errors.Wrap(err, "failed marshalling device code metadata")
+	}
+
+	if me.IsBinaryParamEnabled() {
+		jsonProps = AppendBinaryFlag(jsonProps)
+	}
+
+	// Use device code as the ID, empty token, empty UserId
+	query, args, err := me.getQueryBuilder().
+		Insert("Sessions").
+		Columns("Id", "Token", "CreateAt", "ExpiresAt", "LastActivityAt", "UserId", "DeviceId", "Roles", "IsOAuth", "ExpiredNotify", "Props").
+		Values(metadata.DeviceCode, "", metadata.CreatedAt, metadata.ExpiresAt, metadata.CreatedAt, "", metadata.DeviceCode, "", false, false, jsonProps).
+		ToSql()
+	if err != nil {
+		return errors.Wrap(err, "device_code_metadata_tosql")
+	}
+
+	if _, err = me.GetMaster().Exec(query, args...); err != nil {
+		return errors.Wrapf(err, "failed to store device code metadata with code=%s", metadata.DeviceCode)
+	}
+
+	return nil
+}
+
+// GetDeviceCodeMetadata retrieves device code metadata
+func (me SqlSessionStore) GetDeviceCodeMetadata(rctx request.CTX, deviceCode string) (*model.DeviceCodeMetadata, error) {
+	var sessions []*model.Session
+
+	query := me.sessionSelectQuery.
+		Where(sq.Eq{"Id": deviceCode}).
+		Limit(1)
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return nil, errors.Wrap(err, "get_device_code_metadata_tosql")
+	}
+
+	err = me.DBXFromContext(rctx.Context()).Select(&sessions, sql, args...)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to find device code metadata with code=%s", deviceCode)
+	}
+	if len(sessions) == 0 {
+		return nil, store.NewErrNotFound("DeviceCodeMetadata", fmt.Sprintf("deviceCode=%s", deviceCode))
+	}
+
+	session := sessions[0]
+	
+	// Verify it's actually metadata, not a real session
+	if state, ok := session.Props[model.SessionPropSessionState]; !ok || state != "device_code_metadata" {
+		return nil, errors.New("invalid device code metadata")
+	}
+
+	// Convert back to metadata
+	createdAt := int64(0)
+	if createdStr, ok := session.Props[model.SessionPropCreatedAt]; ok {
+		fmt.Sscanf(createdStr, "%d", &createdAt)
+	}
+
+	metadata := &model.DeviceCodeMetadata{
+		DeviceCode:     session.Props[model.SessionPropDeviceCode],
+		DeviceName:     session.Props[model.SessionPropDeviceName],
+		DevicePlatform: session.Props[model.SessionPropDevicePlatform],
+		AppVersion:     session.Props[model.SessionPropAppVersion],
+		LoginMethod:    session.Props[model.SessionPropLoginMethod],
+		CreatedAt:      createdAt,
+		ExpiresAt:      session.ExpiresAt,
+	}
+
+	return metadata, nil
+}
+
+// DeleteDeviceCodeMetadata deletes device code metadata
+func (me SqlSessionStore) DeleteDeviceCodeMetadata(rctx request.CTX, deviceCode string) error {
+	_, err := me.GetMaster().Exec("DELETE FROM Sessions WHERE Id = ?", deviceCode)
+	if err != nil {
+		return errors.Wrapf(err, "failed to delete device code metadata with code=%s", deviceCode)
+	}
+	return nil
+}
+
+// GetPendingDeviceCodeCount returns the count of pending device codes
+func (me SqlSessionStore) GetPendingDeviceCodeCount(rctx request.CTX) (int, error) {
+	var count int
+	query := `
+		SELECT COUNT(*)
+		FROM Sessions
+		WHERE JSON_UNQUOTE(JSON_EXTRACT(Props, '$.session_state')) = 'device_code_metadata'
+	`
+
+	err := me.GetReplica().Get(&count, query)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count device code metadata")
+	}
+
+	return count, nil
+}
+
+// CleanupExpiredDeviceCodes removes expired device code metadata
+func (me SqlSessionStore) CleanupExpiredDeviceCodes(rctx request.CTX, currentTime int64) (int, error) {
+	query := `
+		DELETE FROM Sessions
+		WHERE JSON_UNQUOTE(JSON_EXTRACT(Props, '$.session_state')) = 'device_code_metadata'
+		AND ExpiresAt < ?
+	`
+
+	result, err := me.GetMaster().Exec(query, currentTime)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to cleanup expired device codes")
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to get rows affected")
+	}
+
+	return int(rowsAffected), nil
+}
