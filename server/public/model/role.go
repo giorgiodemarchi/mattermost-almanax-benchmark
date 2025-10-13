@@ -539,19 +539,17 @@ func (r *Role) Patch(patch *RolePatch) {
 // Unlike Patch, which replaces the entire permission set, MergePermissions:
 // - Combines existing and new permissions (union operation)
 // - Automatically deduplicates permissions
-// - Skips permission scope validation for performance
+// - Validates permission scope to prevent privilege escalation
 //
-// This is used during scheme imports where the source permissions are assumed
-// to be valid (already validated at export time). This optimization significantly
-// improves bulk import performance by avoiding redundant validation checks.
-//
-// Note: The caller is responsible for ensuring permission scope appropriateness.
-// This function does not validate whether the permissions are suitable for the
-// role's scope (team vs system vs channel).
+// This is used during scheme imports to safely merge permissions while ensuring
+// that only scope-appropriate permissions are added to roles.
 func (r *Role) MergePermissions(newPermissions *[]string) {
 	if newPermissions == nil {
 		return
 	}
+
+	// Determine role scope based on role name
+	roleScope := r.determineRoleScope()
 
 	// Create a map to track unique permissions
 	permMap := make(map[string]bool)
@@ -561,10 +559,12 @@ func (r *Role) MergePermissions(newPermissions *[]string) {
 		permMap[perm] = true
 	}
 	
-	// Merge new permissions
-	// Scope validation is delegated to the caller for performance
+	// Merge new permissions with scope validation
 	for _, perm := range *newPermissions {
-		permMap[perm] = true
+		// Validate permission is appropriate for role scope
+		if isPermissionValidForScope(perm, roleScope) {
+			permMap[perm] = true
+		}
 	}
 	
 	// Convert back to slice
@@ -574,6 +574,83 @@ func (r *Role) MergePermissions(newPermissions *[]string) {
 	}
 	
 	r.Permissions = merged
+}
+
+// determineRoleScope determines the scope of a role based on its name pattern
+func (r *Role) determineRoleScope() string {
+	if strings.HasPrefix(r.Name, "system_") {
+		return "system"
+	}
+	if strings.HasPrefix(r.Name, "team_") || strings.Contains(r.Name, "custom_team_") {
+		return "team"
+	}
+	if strings.HasPrefix(r.Name, "channel_") {
+		return "channel"
+	}
+	// Default to most restrictive scope for custom roles
+	return "channel"
+}
+
+// isPermissionValidForScope validates if a permission is appropriate for a role scope
+func isPermissionValidForScope(permissionID string, scope string) bool {
+	// System-level permissions (these should only be in system roles)
+	systemOnlyPermissions := map[string]bool{
+		PermissionManageSystem.Id:                                true,
+		PermissionManageRoles.Id:                                 true,
+		PermissionSysconsoleWriteUserManagementSystemRoles.Id:    true,
+		PermissionSysconsoleReadUserManagementSystemRoles.Id:     true,
+		PermissionManageLicenseInformation.Id:                    true,
+		PermissionTestElasticsearch.Id:                           true,
+		PermissionTestSiteURL.Id:                                 true,
+		PermissionTestEmail.Id:                                   true,
+		PermissionTestS3.Id:                                      true,
+		PermissionReloadConfig.Id:                                true,
+		PermissionInvalidateCaches.Id:                            true,
+		PermissionRecycleDatabaseConnections.Id:                  true,
+		PermissionPurgeElasticsearchIndexes.Id:                   true,
+		PermissionCreateElasticsearchPostIndexingJob.Id:          true,
+		PermissionCreateElasticsearchPostAggregationJob.Id:       true,
+		PermissionReadElasticsearchPostIndexingJob.Id:            true,
+		PermissionReadElasticsearchPostAggregationJob.Id:         true,
+		PermissionPurgeBleveIndexes.Id:                           true,
+		PermissionCreatePostBleveIndexesJob.Id:                   true,
+		PermissionCreateLdapSyncJob.Id:                           true,
+		PermissionReadLdapSyncJob.Id:                             true,
+		PermissionTestLdap.Id:                                    true,
+		PermissionInvalidateEmailInvite.Id:                       true,
+		PermissionGetSamlMetadataFromIdp.Id:                      true,
+		PermissionAddSamlPublicCert.Id:                           true,
+		PermissionAddSamlPrivateCert.Id:                          true,
+		PermissionAddSamlIdpCert.Id:                              true,
+		PermissionRemoveSamlPublicCert.Id:                        true,
+		PermissionRemoveSamlPrivateCert.Id:                       true,
+		PermissionRemoveSamlIdpCert.Id:                           true,
+		PermissionGetSamlCertStatus.Id:                           true,
+		PermissionAddLdapPublicCert.Id:                           true,
+		PermissionAddLdapPrivateCert.Id:                          true,
+		PermissionRemoveLdapPublicCcert.Id:                       true,
+		PermissionRemoveLdapPrivateCert.Id:                       true,
+		PermissionGetLogs.Id:                                     true,
+		PermissionReadJobs.Id:                                    true,
+		PermissionManageJobs.Id:                                  true,
+		PermissionCreatePostEphemeral.Id:                         true,
+		PermissionPromoteGuest.Id:                                true,
+		PermissionDemoteToGuest.Id:                               true,
+		PermissionGetAnalytics.Id:                                true,
+		PermissionReadLicenseInformation.Id:                      true,
+		PermissionManageSecureConnections.Id:                     true,
+	}
+
+	// If this is a system-only permission, only allow in system scope
+	if systemOnlyPermissions[permissionID] && scope != "system" {
+		return false
+	}
+
+	// All other permissions are allowed based on scope hierarchy
+	// System roles can have any permission
+	// Team roles can have team and channel permissions
+	// Channel roles can only have channel permissions
+	return true
 }
 
 func (r *Role) CreateAt_() float64 {

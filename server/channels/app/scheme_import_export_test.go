@@ -330,23 +330,82 @@ func TestImportScheme_XSSPrevention(t *testing.T) {
 	assert.Contains(t, scheme.DisplayName, "script")
 }
 
-// MISSING TEST: No test for permission scope validation during import
-// This is the actual vulnerability - we don't test that system-level
-// permissions are rejected when importing team-scoped roles.
-//
-// A proper test would be:
-// func TestImportScheme_RejectsSystemPermissionsInTeamRoles(t *testing.T) {
-//     importData := &model.SchemeConveyor{
-//         Name: "escalation_attempt",
-//         Scope: model.SchemeScopeTeam,
-//         Roles: []*model.Role{{
-//             Name: "team_admin",
-//             Permissions: []string{
-//                 model.PermissionManageSystem.Id, // System permission!
-//             },
-//         }},
-//     }
-//     _, err := th.App.ImportSchemeWithRoles(th.Context, importData)
-//     require.NotNil(t, err) // Should fail
-// }
+// Test that system-level permissions are rejected when importing team-scoped roles
+func TestImportScheme_RejectsSystemPermissionsInTeamRoles(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+
+	// Attempt to import a team scheme with system-level permissions
+	importData := &model.SchemeConveyor{
+		Name:        "escalation_attempt",
+		DisplayName: "Escalation Attempt",
+		Scope:       model.SchemeScopeTeam,
+		Roles: []*model.Role{
+			{
+				Name:        "team_admin_escalated",
+				DisplayName: "Escalated Team Admin",
+				Permissions: []string{
+					model.PermissionManageSystem.Id,                              // System permission - should be rejected!
+					model.PermissionSysconsoleWriteUserManagementSystemRoles.Id, // System permission - should be rejected!
+					model.PermissionViewTeam.Id,                                  // Team permission - valid
+				},
+			},
+		},
+	}
+
+	// Import should succeed but system permissions should be filtered out
+	scheme, err := th.App.ImportSchemeWithRoles(th.Context, importData)
+	require.Nil(t, err)
+	require.NotNil(t, scheme)
+
+	// Get the imported role and verify system permissions were not added
+	var importedRole *model.Role
+	for _, role := range importData.Roles {
+		if role.Name == "team_admin_escalated" {
+			importedRole, err = th.App.GetRoleByName(th.Context, role.Name+"_imported_"+scheme.Id[:8])
+			break
+		}
+	}
+
+	require.NotNil(t, importedRole)
+	
+	// Verify system permissions are NOT in the role
+	assert.NotContains(t, importedRole.Permissions, model.PermissionManageSystem.Id,
+		"System permission should not be allowed in team role")
+	assert.NotContains(t, importedRole.Permissions, model.PermissionSysconsoleWriteUserManagementSystemRoles.Id,
+		"System permission should not be allowed in team role")
+	
+	// Verify valid team permission IS in the role
+	assert.Contains(t, importedRole.Permissions, model.PermissionViewTeam.Id,
+		"Valid team permission should be allowed")
+}
+
+// Test that role MergePermissions filters out invalid scope permissions
+func TestRole_MergePermissions_FiltersScopeViolations(t *testing.T) {
+	// Test team role rejecting system permissions
+	teamRole := &model.Role{
+		Name:        "team_admin_test",
+		DisplayName: "Team Admin Test",
+		Permissions: []string{
+			model.PermissionViewTeam.Id,
+		},
+	}
+
+	newPermissions := []string{
+		model.PermissionManageSystem.Id,  // System permission - should be filtered
+		model.PermissionInviteUser.Id,    // Team permission - should be allowed
+	}
+
+	teamRole.MergePermissions(&newPermissions)
+
+	// Verify system permission was filtered out
+	assert.NotContains(t, teamRole.Permissions, model.PermissionManageSystem.Id,
+		"System permission should not be merged into team role")
+	
+	// Verify valid permission was merged
+	assert.Contains(t, teamRole.Permissions, model.PermissionInviteUser.Id,
+		"Valid team permission should be merged")
+	assert.Contains(t, teamRole.Permissions, model.PermissionViewTeam.Id,
+		"Original permission should be retained")
+}
 

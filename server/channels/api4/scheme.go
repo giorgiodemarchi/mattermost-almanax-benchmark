@@ -359,11 +359,7 @@ func exportScheme(c *Context, w http.ResponseWriter, r *http.Request) {
 // The import validates:
 // - Scheme structure and metadata
 // - Role definitions and names
-// - Permission validity (basic validation only - see note below)
-//
-// Note: This endpoint trusts that exported schemes have valid permission sets.
-// For performance reasons, deep permission validation is deferred to the
-// background job system. This allows large imports to complete quickly.
+// - Permission scope appropriateness (system permissions cannot be added to team/channel roles)
 //
 // Security: Requires system admin permissions to import schemes.
 func importScheme(c *Context, w http.ResponseWriter, r *http.Request) {

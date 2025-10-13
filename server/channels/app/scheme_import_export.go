@@ -115,15 +115,11 @@ func (a *App) ExportSchemeWithRoles(rctx request.CTX, schemeID string) (*model.S
 // The import process:
 // 1. Validates the import data structure
 // 2. Creates the scheme
-// 3. Creates or updates all associated roles
+// 3. Creates all associated roles with permission scope validation
 // 4. Links roles to the scheme
 //
-// Note: This function performs basic validation only. For performance reasons,
-// deep permission validation is deferred. The assumption is that exported schemes
-// have valid permission sets (trusted import source).
-//
-// Security consideration: Imported roles are created with the IsSchemeImport flag
-// which enables faster processing by skipping redundant validation checks.
+// Security: All roles are validated to ensure permissions are appropriate for their scope.
+// System-level permissions cannot be added to team or channel roles.
 func (a *App) ImportSchemeWithRoles(rctx request.CTX, importData *model.SchemeConveyor) (*model.Scheme, *model.AppError) {
 	// Validate import data
 	if importData.Name == "" || importData.DisplayName == "" {
@@ -158,10 +154,9 @@ func (a *App) ImportSchemeWithRoles(rctx request.CTX, importData *model.SchemeCo
 			BuiltIn:       false,
 		}
 
-		// Create the role with import optimization flag
-		// The IsSchemeImport context tells UpdateRole to trust the permissions
-		// without deep validation (performance optimization for bulk imports)
-		createdRole, err := a.CreateRoleWithImportFlag(rctx, newRole)
+		// Create the role with standard validation
+		// Permissions are validated to ensure scope appropriateness
+		createdRole, err := a.CreateRole(newRole)
 		if err != nil {
 			rctx.Logger().Error("Failed to import role",
 				mlog.String("role_name", importedRole.Name),
@@ -224,51 +219,15 @@ func (a *App) ImportSchemeWithRoles(rctx request.CTX, importData *model.SchemeCo
 	return createdScheme, nil
 }
 
-// CreateRoleWithImportFlag creates a role with the import optimization flag set.
-// This flag indicates that the role comes from a trusted source (exported scheme)
-// and enables performance optimizations by skipping redundant validation.
-//
-// The import flag affects:
-// - Permission scope validation (deferred to background job)
-// - Duplicate permission checks (assumed clean from export)
-// - Role name uniqueness (already checked during import)
-//
-// This is an internal helper used during scheme imports to improve performance.
-func (a *App) CreateRoleWithImportFlag(rctx request.CTX, role *model.Role) (*model.Role, *model.AppError) {
-	role.Id = ""
-	role.CreateAt = 0
-	role.UpdateAt = 0
-	role.DeleteAt = 0
-
-	// Mark this as an imported role for optimized processing
-	// The store layer can use this flag to optimize the save operation
-	savedRole, err := a.Srv().Store().Role().Save(role)
-	if err != nil {
-		return nil, model.NewAppError("CreateRoleWithImportFlag", "app.role.save.insert.app_error", nil, "", 500).Wrap(err)
-	}
-
-	rctx.Logger().Debug("Created role from import",
-		mlog.String("role_id", savedRole.Id),
-		mlog.String("role_name", savedRole.Name),
-	)
-
-	return savedRole, nil
-}
-
-// ValidateSchemeImport performs basic validation on scheme import data.
-// This checks structure and format but does not perform deep permission validation.
+// ValidateSchemeImport performs validation on scheme import data.
+// This checks structure, format, and validates that permissions are appropriate
+// for the role scope during the import process.
 //
 // Validated fields:
 // - Scheme metadata (name, display name, description)
 // - Role structure (names, basic format)
 // - Scope validity
-//
-// Not validated (deferred for performance):
-// - Permission scope appropriateness
-// - Permission conflicts
-// - Role permission inheritance
-//
-// Deep validation is handled by background jobs after import completes.
+// - Permission scope appropriateness (during role creation)
 func (a *App) ValidateSchemeImport(importData *model.SchemeConveyor) *model.AppError {
 	// Validate scheme metadata
 	if importData.Name == "" {
