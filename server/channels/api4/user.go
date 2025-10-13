@@ -63,6 +63,14 @@ func (api *API) InitUser() {
 
 	api.BaseRoutes.User.Handle("/mfa", api.APISessionRequiredMfa(updateUserMfa)).Methods(http.MethodPut)
 	api.BaseRoutes.User.Handle("/mfa/generate", api.APISessionRequiredMfa(generateMfaSecret)).Methods(http.MethodPost)
+	
+	// MFA Recovery endpoints
+	api.BaseRoutes.Users.Handle("/mfa/recovery/request", api.APIHandler(requestMfaRecovery)).Methods(http.MethodPost)
+	api.BaseRoutes.Users.Handle("/mfa/recovery/verify", api.APIHandler(verifyMfaRecovery)).Methods(http.MethodPost)
+	api.BaseRoutes.Users.Handle("/mfa/recovery/complete", api.APIHandler(completeMfaRecovery)).Methods(http.MethodPost)
+	api.BaseRoutes.User.Handle("/mfa/backup_codes", api.APISessionRequired(generateBackupCodes)).Methods(http.MethodPost)
+	api.BaseRoutes.User.Handle("/mfa/backup_codes", api.APISessionRequired(getBackupCodeStatus)).Methods(http.MethodGet)
+	api.BaseRoutes.User.Handle("/mfa/recovery/admin_reset", api.APISessionRequired(adminResetUserMfa)).Methods(http.MethodPost)
 
 	api.BaseRoutes.Users.Handle("/login", api.APIHandler(login)).Methods(http.MethodPost)
 	api.BaseRoutes.Users.Handle("/login/sso/code-exchange", api.APIHandler(loginSSOCodeExchange)).Methods(http.MethodPost)
@@ -1817,6 +1825,253 @@ func generateMfaSecret(c *Context, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
 	if err := json.NewEncoder(w).Encode(secret); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// requestMfaRecovery initiates the MFA recovery process
+func requestMfaRecovery(c *Context, w http.ResponseWriter, r *http.Request) {
+	auditRec := c.MakeAuditRecord("requestMfaRecovery", model.AuditStatusFail)
+	defer c.LogAuditRec(auditRec)
+
+	request := model.MfaRecoveryRequestFromJSON(r.Body)
+	if request == nil {
+		c.SetInvalidParam("request")
+		return
+	}
+
+	if err := request.IsValid(); err != nil {
+		c.Err = err
+		return
+	}
+
+	auditRec.AddMeta("email", request.Email)
+	auditRec.AddMeta("recovery_method", request.RecoveryMethod)
+
+	response, appErr := c.App.InitiateMfaRecovery(c.AppContext, request.Email, request.RecoveryMethod)
+	if appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	auditRec.Success()
+	
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// verifyMfaRecovery verifies a recovery code
+func verifyMfaRecovery(c *Context, w http.ResponseWriter, r *http.Request) {
+	auditRec := c.MakeAuditRecord("verifyMfaRecovery", model.AuditStatusFail)
+	defer c.LogAuditRec(auditRec)
+
+	request := model.MfaRecoveryVerifyRequestFromJSON(r.Body)
+	if request == nil {
+		c.SetInvalidParam("request")
+		return
+	}
+
+	if err := request.IsValid(); err != nil {
+		c.Err = err
+		return
+	}
+
+	// Verify the recovery code exists and is valid
+	token, tokenErr := c.App.Srv().Store().Token().GetByToken(request.RecoveryCode)
+	if tokenErr != nil {
+		c.Err = model.NewAppError("verifyMfaRecovery", "api.mfa_recovery.invalid_code.app_error", nil, "", http.StatusBadRequest)
+		return
+	}
+
+	if token.Type != "mfa_recovery" {
+		c.Err = model.NewAppError("verifyMfaRecovery", "api.mfa_recovery.invalid_code.app_error", nil, "", http.StatusBadRequest)
+		return
+	}
+
+	if token.IsExpired() {
+		c.App.Srv().Store().Token().Delete(token.Token)
+		c.Err = model.NewAppError("verifyMfaRecovery", "api.mfa_recovery.expired_code.app_error", nil, "", http.StatusBadRequest)
+		return
+	}
+
+	auditRec.Success()
+	auditRec.AddMeta("email", request.Email)
+
+	response := model.MfaRecoveryResponse{
+		Success: true,
+		Message: "Recovery code verified successfully.",
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// completeMfaRecovery completes the MFA recovery process
+func completeMfaRecovery(c *Context, w http.ResponseWriter, r *http.Request) {
+	auditRec := c.MakeAuditRecord("completeMfaRecovery", model.AuditStatusFail)
+	defer c.LogAuditRec(auditRec)
+
+	var request struct {
+		Email        string `json:"email"`
+		RecoveryCode string `json:"recovery_code"`
+		ResetMfa     bool   `json:"reset_mfa"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		c.SetInvalidParam("request")
+		return
+	}
+
+	if request.Email == "" || request.RecoveryCode == "" {
+		c.SetInvalidParam("email or recovery_code")
+		return
+	}
+
+	auditRec.AddMeta("email", request.Email)
+	auditRec.AddMeta("reset_mfa", request.ResetMfa)
+
+	if appErr := c.App.CompleteMfaRecovery(c.AppContext, request.Email, request.RecoveryCode, request.ResetMfa); appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	auditRec.Success()
+
+	response := model.MfaRecoveryResponse{
+		Success: true,
+		Message: "MFA recovery completed successfully.",
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// generateBackupCodes generates new MFA backup codes for a user
+func generateBackupCodes(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireUserId()
+	if c.Err != nil {
+		return
+	}
+
+	auditRec := c.MakeAuditRecord("generateMfaBackupCodes", model.AuditStatusFail)
+	defer c.LogAuditRec(auditRec)
+
+	if !c.App.SessionHasPermissionToUser(*c.AppContext.Session(), c.Params.UserId) {
+		c.SetPermissionError(model.PermissionEditOtherUsers)
+		return
+	}
+
+	// Verify user has MFA enabled before allowing backup code generation
+	user, err := c.App.GetUser(c.Params.UserId)
+	if err != nil {
+		c.Err = err
+		return
+	}
+
+	if !user.MfaActive {
+		c.Err = model.NewAppError("generateBackupCodes", "api.mfa_recovery.mfa_not_enabled.app_error", nil, "", http.StatusBadRequest)
+		return
+	}
+
+	codes, appErr := c.App.GenerateMfaBackupCodes(c.AppContext, c.Params.UserId)
+	if appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	auditRec.Success()
+	auditRec.AddMeta("code_count", len(codes.BackupCodes))
+
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(codes); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// getBackupCodeStatus returns the status of a user's backup codes
+func getBackupCodeStatus(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireUserId()
+	if c.Err != nil {
+		return
+	}
+
+	if !c.App.SessionHasPermissionToUser(*c.AppContext.Session(), c.Params.UserId) {
+		c.SetPermissionError(model.PermissionEditOtherUsers)
+		return
+	}
+
+	user, err := c.App.GetUser(c.Params.UserId)
+	if err != nil {
+		c.Err = err
+		return
+	}
+
+	status := map[string]interface{}{
+		"has_codes": len(user.MfaBackupCodes) > 0,
+		"total_codes": len(user.MfaBackupCodes),
+		"used_codes": len(user.MfaBackupCodesUsed),
+		"remaining_codes": len(user.MfaBackupCodes) - len(user.MfaBackupCodesUsed),
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(status); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+
+// adminResetUserMfa allows an admin to reset a user's MFA
+func adminResetUserMfa(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireUserId()
+	if c.Err != nil {
+		return
+	}
+
+	auditRec := c.MakeAuditRecord("adminResetUserMfa", model.AuditStatusFail)
+	defer c.LogAuditRec(auditRec)
+
+	// Verify admin has system admin permission
+	if !c.App.SessionHasPermissionTo(*c.AppContext.Session(), model.PermissionManageSystem) {
+		c.SetPermissionError(model.PermissionManageSystem)
+		return
+	}
+
+	request := model.MfaAdminRecoveryRequestFromJSON(r.Body)
+	if request == nil {
+		c.SetInvalidParam("request")
+		return
+	}
+
+	if request.UserId == "" {
+		c.SetInvalidParam("user_id")
+		return
+	}
+
+	auditRec.AddMeta("target_user_id", request.UserId)
+	auditRec.AddMeta("reason", request.Reason)
+
+	if appErr := c.App.AdminResetUserMfa(c.AppContext, c.AppContext.Session().UserId, request.UserId, request.Reason); appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	auditRec.Success()
+
+	response := map[string]interface{}{
+		"success": true,
+		"message": "User MFA reset initiated successfully.",
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		c.Logger.Warn("Error while writing response", mlog.Err(err))
 	}
 }

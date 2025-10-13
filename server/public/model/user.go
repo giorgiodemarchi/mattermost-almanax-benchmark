@@ -68,6 +68,16 @@ const (
 	UserRolesMaxLength    = 256
 
 	DesktopTokenTTL = time.Minute * 3
+
+	// MFA Recovery states
+	MfaRecoveryStatePending        = "pending"
+	MfaRecoveryStateEmailSent      = "email_sent"
+	MfaRecoveryStateCodeVerified   = "code_verified"
+	MfaRecoveryStateBackupCode     = "backup_code"
+	MfaRecoveryStateAdminAssisted  = "admin_assisted"
+	MfaRecoveryExpiry24Hours       = int64(24 * 60 * 60 * 1000)
+	MfaRecoveryExpiry48Hours       = int64(48 * 60 * 60 * 1000)
+	MfaBackupCodesCount            = 10
 )
 
 //msgp:tuple User
@@ -111,6 +121,10 @@ type User struct {
 	DisableWelcomeEmail    bool        `json:"disable_welcome_email"`
 	LastLogin              int64       `json:"last_login,omitempty"`
 	MfaUsedTimestamps      StringArray `json:"mfa_used_timestamps,omitempty"`
+	MfaRecoveryState       string      `json:"mfa_recovery_state,omitempty"`
+	MfaRecoveryExpiry      int64       `json:"mfa_recovery_expiry,omitempty"`
+	MfaBackupCodes         StringArray `json:"mfa_backup_codes,omitempty"`
+	MfaBackupCodesUsed     StringArray `json:"mfa_backup_codes_used,omitempty"`
 }
 
 func (u *User) Auditable() map[string]any {
@@ -675,6 +689,10 @@ func (u *User) Sanitize(options map[string]bool) {
 	u.Password = ""
 	u.MfaSecret = ""
 	u.MfaUsedTimestamps = nil
+	u.MfaBackupCodes = nil
+	u.MfaBackupCodesUsed = nil
+	u.MfaRecoveryState = ""
+	u.MfaRecoveryExpiry = 0
 	u.LastLogin = 0
 
 	if len(options) != 0 {
@@ -715,6 +733,10 @@ func (u *User) SanitizeInput(isAdmin bool) {
 	u.MfaActive = false
 	u.MfaSecret = ""
 	u.MfaUsedTimestamps = StringArray{}
+	u.MfaRecoveryState = ""
+	u.MfaRecoveryExpiry = 0
+	u.MfaBackupCodes = StringArray{}
+	u.MfaBackupCodesUsed = StringArray{}
 	u.Email = strings.TrimSpace(u.Email)
 	u.LastActivityAt = 0
 }
@@ -723,6 +745,10 @@ func (u *User) ClearNonProfileFields(asAdmin bool) {
 	u.Password = ""
 	u.MfaSecret = ""
 	u.MfaUsedTimestamps = nil
+	u.MfaBackupCodes = nil
+	u.MfaBackupCodesUsed = nil
+	u.MfaRecoveryState = ""
+	u.MfaRecoveryExpiry = 0
 	u.EmailVerified = false
 	u.AllowMarketing = false
 	u.LastPasswordUpdate = 0
