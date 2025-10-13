@@ -1,0 +1,241 @@
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
+
+.desktop-auth-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 20px;
+}
+
+.desktop-auth-card {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+    padding: 40px;
+    max-width: 500px;
+    width: 100%;
+    animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.desktop-auth-header {
+    text-align: center;
+    margin-bottom: 30px;
+
+    h1 {
+        color: #333;
+        font-size: 28px;
+        font-weight: 600;
+        margin-bottom: 10px;
+    }
+
+    p {
+        color: #666;
+        font-size: 14px;
+        line-height: 1.5;
+    }
+}
+
+.desktop-auth-input-group {
+    margin-bottom: 20px;
+
+    input {
+        width: 100%;
+        padding: 12px;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        font-size: 14px;
+        transition: border-color 0.2s;
+
+        &:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+    }
+}
+
+.desktop-auth-login-method {
+    margin-bottom: 20px;
+}
+
+.desktop-auth-checkbox {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    font-size: 14px;
+    color: #666;
+
+    input[type="checkbox"] {
+        margin-right: 8px;
+        cursor: pointer;
+    }
+}
+
+.desktop-auth-code-display,
+.desktop-auth-qr-display {
+    text-align: center;
+    margin: 30px 0;
+
+    h2 {
+        color: #333;
+        font-size: 20px;
+        font-weight: 600;
+        margin-bottom: 20px;
+    }
+}
+
+.device-code-large {
+    background: #f8f9fa;
+    border: 2px dashed #667eea;
+    border-radius: 8px;
+    padding: 20px;
+    font-size: 32px;
+    font-weight: bold;
+    letter-spacing: 4px;
+    color: #667eea;
+    font-family: 'Courier New', monospace;
+    margin-bottom: 15px;
+}
+
+.device-code-instruction,
+.qr-code-instruction {
+    color: #666;
+    font-size: 14px;
+    margin-bottom: 10px;
+}
+
+.device-code-expiry {
+    color: #999;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.qr-code-container {
+    display: flex;
+    justify-content: center;
+    margin: 20px 0;
+
+    img {
+        max-width: 200px;
+        height: auto;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 10px;
+        background: white;
+    }
+}
+
+.desktop-auth-session-info {
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 20px;
+
+    .device-code-display {
+        font-family: 'Courier New', monospace;
+        font-size: 16px;
+        font-weight: 600;
+        color: #333;
+        margin: 0;
+    }
+}
+
+.desktop-auth-error {
+    background: #fee;
+    border: 1px solid #fcc;
+    border-radius: 6px;
+    padding: 12px;
+    color: #c33;
+    font-size: 14px;
+    margin-bottom: 20px;
+}
+
+.desktop-auth-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+
+    button {
+        flex: 1;
+    }
+}
+
+.desktop-auth-manual-entry {
+    margin-top: 30px;
+    padding-top: 30px;
+    border-top: 1px solid #eee;
+
+    h3 {
+        font-size: 16px;
+        color: #666;
+        margin-bottom: 15px;
+        text-align: center;
+    }
+
+    button {
+        width: 100%;
+        margin-top: 10px;
+    }
+}
+
+.btn {
+    padding: 12px 24px;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+
+    &:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+    }
+
+    &.btn-primary {
+        background: #667eea;
+        color: white;
+
+        &:hover:not(:disabled) {
+            background: #5568d3;
+        }
+    }
+
+    &.btn-secondary {
+        background: #f1f3f5;
+        color: #495057;
+
+        &:hover:not(:disabled) {
+            background: #e9ecef;
+        }
+    }
+}
+
+@media (max-width: 768px) {
+    .desktop-auth-card {
+        padding: 30px 20px;
+    }
+
+    .desktop-auth-header h1 {
+        font-size: 24px;
+    }
+
+    .device-code-large {
+        font-size: 24px;
+        letter-spacing: 2px;
+    }
+}
+

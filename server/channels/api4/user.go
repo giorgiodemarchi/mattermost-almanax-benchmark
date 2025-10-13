@@ -70,6 +70,16 @@ func (api *API) InitUser() {
 	api.BaseRoutes.Users.Handle("/login/switch", api.APIHandler(switchAccountType)).Methods(http.MethodPost)
 	api.BaseRoutes.Users.Handle("/login/cws", api.APIHandlerTrustRequester(loginCWS)).Methods(http.MethodPost)
 	api.BaseRoutes.Users.Handle("/logout", api.APIHandler(logout)).Methods(http.MethodPost)
+	
+	// Desktop login endpoints
+	api.BaseRoutes.Users.Handle("/login/desktop/init", api.APIHandler(initDesktopLogin)).Methods(http.MethodPost)
+	api.BaseRoutes.Users.Handle("/login/desktop/verify", api.APIHandler(verifyDesktopLoginCode)).Methods(http.MethodGet)
+	api.BaseRoutes.Users.Handle("/login/desktop/complete", api.APISessionRequired(completeDesktopLogin)).Methods(http.MethodPost)
+	api.BaseRoutes.Users.Handle("/login/desktop/cancel", api.APIHandler(cancelDesktopLogin)).Methods(http.MethodPost)
+	api.BaseRoutes.Users.Handle("/login/desktop/qr", api.APISessionRequired(generateQRCodeForSession)).Methods(http.MethodPost)
+	api.BaseRoutes.User.Handle("/sessions/desktop/sync", api.APISessionRequired(syncDesktopSessions)).Methods(http.MethodGet)
+	api.BaseRoutes.User.Handle("/sessions/desktop/refresh", api.APISessionRequired(refreshDesktopSession)).Methods(http.MethodPost)
+	api.BaseRoutes.Users.Handle("/sessions/desktop/attach", api.APISessionRequired(attachDeviceToSession)).Methods(http.MethodPost)
 
 	api.BaseRoutes.UserByUsername.Handle("", api.APISessionRequired(getUserByUsername)).Methods(http.MethodGet)
 	api.BaseRoutes.UserByEmail.Handle("", api.APISessionRequired(getUserByEmail)).Methods(http.MethodGet)

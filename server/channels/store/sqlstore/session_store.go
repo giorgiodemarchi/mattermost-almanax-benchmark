@@ -394,3 +394,143 @@ func (me SqlSessionStore) Cleanup(expiryTime int64, batchSize int64) error {
 
 	return nil
 }
+
+// Desktop login methods
+
+// GetSessionByDeviceCode retrieves a session by device code
+func (me SqlSessionStore) GetSessionByDeviceCode(rctx request.CTX, deviceCode string) (*model.Session, error) {
+	sessions := []*model.Session{}
+
+	// Query sessions by Props->>'device_code' (JSON field)
+	// This works for PostgreSQL and MySQL 5.7+
+	query := `
+		SELECT Id, Token, CreateAt, ExpiresAt, LastActivityAt, UserId, DeviceId, Roles, IsOAuth, ExpiredNotify, Props
+		FROM Sessions
+		WHERE JSON_UNQUOTE(JSON_EXTRACT(Props, '$.device_code')) = ?
+		LIMIT 1
+	`
+
+	err := me.DBXFromContext(rctx.Context()).Select(&sessions, query, deviceCode)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to find Session with deviceCode=%s", deviceCode)
+	}
+	if len(sessions) == 0 {
+		return nil, store.NewErrNotFound("Session", fmt.Sprintf("deviceCode=%s", deviceCode))
+	}
+
+	return sessions[0], nil
+}
+
+// GetPendingSessionCount returns the count of pending sessions
+func (me SqlSessionStore) GetPendingSessionCount(rctx request.CTX) (int, error) {
+	var count int
+	query := `
+		SELECT COUNT(*)
+		FROM Sessions
+		WHERE JSON_UNQUOTE(JSON_EXTRACT(Props, '$.session_state')) = 'pending_activation'
+	`
+
+	err := me.GetReplica().Get(&count, query)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count pending sessions")
+	}
+
+	return count, nil
+}
+
+// GetPendingSessions returns pending desktop login sessions
+func (me SqlSessionStore) GetPendingSessions(rctx request.CTX, limit int) ([]*model.Session, error) {
+	sessions := []*model.Session{}
+
+	query := `
+		SELECT Id, Token, CreateAt, ExpiresAt, LastActivityAt, UserId, DeviceId, Roles, IsOAuth, ExpiredNotify, Props
+		FROM Sessions
+		WHERE JSON_UNQUOTE(JSON_EXTRACT(Props, '$.session_state')) = 'pending_activation'
+		ORDER BY CreateAt DESC
+		LIMIT ?
+	`
+
+	err := me.GetReplica().Select(&sessions, query, limit)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to find pending sessions")
+	}
+
+	return sessions, nil
+}
+
+// UpdateDeviceCodeSession updates a session with user information after device code verification
+func (me SqlSessionStore) UpdateDeviceCodeSession(rctx request.CTX, session *model.Session) (*model.Session, error) {
+	if session == nil || session.Id == "" {
+		return nil, errors.New("session or session ID is required")
+	}
+
+	jsonProps, err := json.Marshal(session.Props)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed marshalling session props")
+	}
+
+	if me.IsBinaryParamEnabled() {
+		jsonProps = AppendBinaryFlag(jsonProps)
+	}
+
+	query, args, err := me.getQueryBuilder().
+		Update("Sessions").
+		Set("UserId", session.UserId).
+		Set("Roles", session.Roles).
+		Set("ExpiresAt", session.ExpiresAt).
+		Set("Props", jsonProps).
+		Where(sq.Eq{"Id": session.Id}).
+		ToSql()
+	if err != nil {
+		return nil, errors.Wrap(err, "update_device_code_session_tosql")
+	}
+
+	if _, err = me.GetMaster().Exec(query, args...); err != nil {
+		return nil, errors.Wrapf(err, "failed to update Session with id=%s", session.Id)
+	}
+
+	// Fetch team members for the activated session
+	teamMembers, err := me.Team().GetTeamsForUser(rctx, session.UserId, "", true)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to find TeamMembers for Session with userId=%s", session.UserId)
+	}
+
+	session.TeamMembers = make([]*model.TeamMember, 0, len(teamMembers))
+	for _, tm := range teamMembers {
+		if tm.DeleteAt == 0 {
+			session.TeamMembers = append(session.TeamMembers, tm)
+		}
+	}
+
+	return session, nil
+}
+
+// CleanupExpiredPendingSessions removes expired pending sessions
+func (me SqlSessionStore) CleanupExpiredPendingSessions(rctx request.CTX, currentTime int64) (int, error) {
+	query := `
+		DELETE FROM Sessions
+		WHERE JSON_UNQUOTE(JSON_EXTRACT(Props, '$.session_state')) = 'pending_activation'
+		AND ExpiresAt < ?
+	`
+
+	result, err := me.GetMaster().Exec(query, currentTime)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to cleanup expired pending sessions")
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to get rows affected")
+	}
+
+	return int(rowsAffected), nil
+}
+
+// UpdateExpiresAt updates session expiry time (already exists above, but adding for interface consistency)
+func (me SqlSessionStore) UpdateExpiresAt(rctx request.CTX, sessionId string, expiresAt int64) error {
+	_, err := me.GetMaster().Exec("UPDATE Sessions SET ExpiresAt = ?, ExpiredNotify = false WHERE Id = ?", expiresAt, sessionId)
+	if err != nil {
+		return errors.Wrapf(err, "failed to update Session with sessionId=%s", sessionId)
+	}
+	return nil
+}

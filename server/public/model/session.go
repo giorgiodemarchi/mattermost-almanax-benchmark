@@ -35,6 +35,30 @@ const (
 	SessionPropIsGuest                    = "is_guest"
 	SessionActivityTimeout                = 1000 * 60 * 5  // 5 minutes
 	SessionUserAccessTokenExpiryHours     = 100 * 365 * 24 // 100 years
+	
+	// Desktop login session properties
+	SessionPropDeviceCode         = "device_code"
+	SessionPropSessionState       = "session_state"
+	SessionPropDeviceName         = "device_name"
+	SessionPropDevicePlatform     = "device_platform"
+	SessionPropDeviceModel        = "device_model"
+	SessionPropDeviceOS           = "device_os"
+	SessionPropDeviceOSVersion    = "device_os_version"
+	SessionPropAppVersion         = "app_version"
+	SessionPropLoginMethod        = "login_method"
+	SessionPropCreatedAt          = "created_at_timestamp"
+	SessionPropActivatedAt        = "activated_at"
+	SessionPropDeviceAttachedAt   = "device_attached_at"
+	SessionPropQRDeviceCode       = "qr_device_code"
+	SessionPropQRGeneratedAt      = "qr_generated_at"
+	SessionPropSyncedAt           = "synced_at"
+	SessionPropLastSyncDevice     = "last_sync_device"
+	
+	// Session states for desktop login flow
+	SessionStatePendingActivation = "pending_activation"
+	SessionStateActive            = "active"
+	SessionStateExpired           = "expired"
+	SessionStateSuspended         = "suspended"
 )
 
 //msgp:tuple StringMap
@@ -290,4 +314,40 @@ func (s *Session) ExpiresAt_() float64 {
 
 func (s *Session) LastActivityAt_() float64 {
 	return float64(s.LastActivityAt)
+}
+
+// DeviceInfo contains information about a device for session management
+type DeviceInfo struct {
+	DeviceId  string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	Platform  string `json:"platform"`
+	Model     string `json:"model,omitempty"`
+	OS        string `json:"os,omitempty"`
+	OSVersion string `json:"os_version,omitempty"`
+}
+
+// IsPendingActivation returns true if the session is waiting for user authentication
+func (s *Session) IsPendingActivation() bool {
+	if s.Props == nil {
+		return false
+	}
+	state, ok := s.Props[SessionPropSessionState]
+	return ok && state == SessionStatePendingActivation
+}
+
+// IsDesktopSession returns true if the session was created via desktop login flow
+func (s *Session) IsDesktopSession() bool {
+	if s.Props == nil {
+		return false
+	}
+	loginMethod, ok := s.Props[SessionPropLoginMethod]
+	return ok && (loginMethod == "device_code" || loginMethod == "qr_code")
+}
+
+// GetDeviceCode returns the device code associated with this session
+func (s *Session) GetDeviceCode() string {
+	if s.Props == nil {
+		return ""
+	}
+	return s.Props[SessionPropDeviceCode]
 }
