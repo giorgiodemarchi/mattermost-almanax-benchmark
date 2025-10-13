@@ -143,25 +143,73 @@ func TestSearchQueryBuilder_FieldPathValidation(t *testing.T) {
 		}
 
 		for _, path := range validPaths {
-			err := validateFieldPath(path)
+			_, err := validateAndSanitizeFieldPath(path)
 			assert.NoError(t, err, "Path should be valid: %s", path)
 		}
 	})
 
-	t.Run("Dangerous SQL keywords are rejected", func(t *testing.T) {
-		// Note: This only tests UPPERCASE keywords
-		// The vulnerability is that lowercase/mixed case are NOT rejected
+	t.Run("Dangerous SQL keywords are rejected (case-insensitive)", func(t *testing.T) {
 		dangerousPaths := []string{
+			// Uppercase
 			"field.SELECT",
 			"test.DROP",
 			"data.DELETE",
-			"value.INSERT",
-			"name.UPDATE",
+			// Lowercase (previously vulnerable)
+			"field.select",
+			"test.drop",
+			"data.delete",
+			// Mixed case (previously vulnerable)
+			"field.SeLeCt",
+			"test.DrOp",
+			"data.DeLeTe",
+			// Other SQL keywords
+			"value.insert",
+			"name.update",
+			"test.union",
+			"data.exec",
 		}
 
 		for _, path := range dangerousPaths {
-			err := validateFieldPath(path)
+			_, err := validateAndSanitizeFieldPath(path)
 			assert.Error(t, err, "Path should be rejected: %s", path)
+		}
+	})
+
+	t.Run("SQL injection patterns are rejected", func(t *testing.T) {
+		injectionPaths := []string{
+			"field'; DROP TABLE Posts--",
+			"field' OR '1'='1",
+			"field'; DELETE FROM Users--",
+			"field' UNION SELECT password FROM Users--",
+			"field'||'injection",
+			"field' && true",
+			"field/* comment */",
+			"field;DROP TABLE",
+		}
+
+		for _, path := range injectionPaths {
+			_, err := validateAndSanitizeFieldPath(path)
+			assert.Error(t, err, "Injection attempt should be rejected: %s", path)
+		}
+	})
+
+	t.Run("Invalid characters are rejected", func(t *testing.T) {
+		invalidPaths := []string{
+			"field@domain",
+			"field$value",
+			"field#tag",
+			"field%wildcard",
+			"field&value",
+			"field*star",
+			"field+plus",
+			"field=equals",
+			"field<less",
+			"field>greater",
+		}
+
+		for _, path := range invalidPaths {
+			_, err := validateAndSanitizeFieldPath(path)
+			assert.Error(t, err, "Invalid characters should be rejected: %s", path)
 		}
 	})
 
@@ -171,8 +219,21 @@ func TestSearchQueryBuilder_FieldPathValidation(t *testing.T) {
 			longPath += "a"
 		}
 
-		err := validateFieldPath(longPath)
+		_, err := validateAndSanitizeFieldPath(longPath)
 		assert.Error(t, err)
+	})
+
+	t.Run("Empty path segments are rejected", func(t *testing.T) {
+		invalidPaths := []string{
+			"field..nested",
+			".field",
+			"field.",
+		}
+
+		for _, path := range invalidPaths {
+			_, err := validateAndSanitizeFieldPath(path)
+			assert.Error(t, err, "Empty segments should be rejected: %s", path)
+		}
 	})
 }
 

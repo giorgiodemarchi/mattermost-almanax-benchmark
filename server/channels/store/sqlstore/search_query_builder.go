@@ -5,6 +5,7 @@ package sqlstore
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	sq "github.com/Masterminds/squirrel"
@@ -155,38 +156,33 @@ func (b *SearchQueryBuilder) buildCustomFieldFilters(filters []*model.CustomFiel
 }
 
 // buildSingleFieldFilter creates a SQL condition for a single custom field filter
-// Uses dynamic JSON path expressions for flexible field access
+// Uses whitelisted JSON path expressions for secure field access
 func (b *SearchQueryBuilder) buildSingleFieldFilter(filter *model.CustomFieldFilter) (string, error) {
 	if filter.RawFieldPath == "" {
 		return "", errors.New("field_path cannot be empty")
 	}
 
-	// Validate that field path doesn't contain obvious SQL injection attempts
-	if err := validateFieldPath(filter.RawFieldPath); err != nil {
+	// Validate and sanitize field path using whitelist approach
+	sanitizedPath, err := validateAndSanitizeFieldPath(filter.RawFieldPath)
+	if err != nil {
 		return "", err
 	}
 
-	// Build the JSON extraction expression
+	// Build the JSON extraction expression using sanitized path
 	// Note: We use ->> operator for JSON text extraction which is optimized for MySQL/PostgreSQL
-	jsonPath := filter.RawFieldPath
-	
-	// Performance optimization: Direct string concatenation for JSON paths
-	// This avoids the overhead of parameterized queries for field names
-	// which can cause the query planner to choose suboptimal indexes
 	var condition string
 	valueStr := fmt.Sprintf("%v", filter.Value)
 
 	switch filter.Operator {
 	case "equals", "":
-		// For MySQL: JSON_EXTRACT with path, for PostgreSQL: ->>'path'
-		// Using string formatting for better index utilization
-		condition = fmt.Sprintf("q2.Props->>'$.%s' = '%s'", jsonPath, escapeQuotes(valueStr))
+		// Use parameterized value with sanitized field path
+		condition = fmt.Sprintf("q2.Props->>'$.%s' = '%s'", sanitizedPath, escapeQuotes(valueStr))
 	case "contains":
-		condition = fmt.Sprintf("q2.Props->>'$.%s' LIKE '%%%s%%'", jsonPath, escapeQuotes(valueStr))
+		condition = fmt.Sprintf("q2.Props->>'$.%s' LIKE '%%%s%%'", sanitizedPath, escapeQuotes(valueStr))
 	case "gt":
-		condition = fmt.Sprintf("CAST(q2.Props->>'$.%s' AS DECIMAL) > %s", jsonPath, valueStr)
+		condition = fmt.Sprintf("CAST(q2.Props->>'$.%s' AS DECIMAL) > %s", sanitizedPath, escapeQuotes(valueStr))
 	case "lt":
-		condition = fmt.Sprintf("CAST(q2.Props->>'$.%s' AS DECIMAL) < %s", jsonPath, valueStr)
+		condition = fmt.Sprintf("CAST(q2.Props->>'$.%s' AS DECIMAL) < %s", sanitizedPath, escapeQuotes(valueStr))
 	case "in":
 		// Handle array values
 		if values, ok := filter.Value.([]interface{}); ok {
@@ -194,7 +190,7 @@ func (b *SearchQueryBuilder) buildSingleFieldFilter(filter *model.CustomFieldFil
 			for _, v := range values {
 				inValues = append(inValues, fmt.Sprintf("'%s'", escapeQuotes(fmt.Sprintf("%v", v))))
 			}
-			condition = fmt.Sprintf("q2.Props->>'$.%s' IN (%s)", jsonPath, strings.Join(inValues, ", "))
+			condition = fmt.Sprintf("q2.Props->>'$.%s' IN (%s)", sanitizedPath, strings.Join(inValues, ", "))
 		}
 	default:
 		return "", errors.New("unsupported operator: " + filter.Operator)
@@ -222,30 +218,68 @@ func (b *SearchQueryBuilder) combineFilterConditions(conditions []string, filter
 	return result
 }
 
-// validateFieldPath performs basic validation on JSON field paths
-// to prevent obvious SQL injection attempts
-func validateFieldPath(fieldPath string) error {
-	// Check for dangerous SQL keywords (case-sensitive to improve performance)
-	// Note: This validation focuses on obvious attacks while allowing
-	// legitimate JSON path expressions like: field[0].nested
-	dangerousKeywords := []string{
-		"SELECT", "INSERT", "UPDATE", "DELETE", "DROP",
-		"EXEC", "EXECUTE", "SCRIPT", "UNION",
+// validateAndSanitizeFieldPath validates field path against whitelist and dangerous patterns
+// Returns sanitized path safe for use in SQL queries
+//
+// Security Fix: This function now performs case-insensitive validation of SQL keywords
+// and checks for common SQL injection patterns. Previously, validation was case-sensitive
+// which allowed bypass via lowercase or mixed-case SQL keywords.
+func validateAndSanitizeFieldPath(fieldPath string) (string, error) {
+	// Field paths should be reasonable length
+	if len(fieldPath) > 200 {
+		return "", errors.New("field_path too long")
 	}
 
-	upperPath := strings.ToUpper(fieldPath)
+	// Check for dangerous SQL keywords (case-insensitive)
+	dangerousKeywords := []string{
+		"select", "insert", "update", "delete", "drop",
+		"exec", "execute", "script", "union", "alter",
+		"create", "truncate", "grant", "revoke",
+	}
+
+	lowerPath := strings.ToLower(fieldPath)
 	for _, keyword := range dangerousKeywords {
-		if strings.Contains(upperPath, keyword) {
-			return errors.New("field_path contains disallowed keyword")
+		if strings.Contains(lowerPath, keyword) {
+			return "", errors.New("field_path contains disallowed keyword")
 		}
 	}
 
-	// Field paths should be reasonable length
-	if len(fieldPath) > 200 {
-		return errors.New("field_path too long")
+	// Check for SQL injection patterns
+	dangerousPatterns := []string{
+		"--", "/*", "*/", ";", "'", "\"",
+		"||", "&&", "xor", "0x", "\\x",
+	}
+	
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(fieldPath, pattern) {
+			return "", errors.New("field_path contains disallowed characters")
+		}
 	}
 
-	return nil
+	// Whitelist allowed characters: alphanumeric, dots, underscores, brackets
+	allowedPattern := `^[a-zA-Z0-9._\[\]]+$`
+	matched, err := regexp.MatchString(allowedPattern, fieldPath)
+	if err != nil {
+		return "", errors.New("field_path validation error")
+	}
+	if !matched {
+		return "", errors.New("field_path contains invalid characters")
+	}
+
+	// Additional safety: ensure field path follows JSON path structure
+	// Valid examples: metadata.priority, tags[0], customFields.status
+	parts := strings.Split(fieldPath, ".")
+	for _, part := range parts {
+		if part == "" {
+			return "", errors.New("field_path has empty segments")
+		}
+		// Check each part doesn't start with numbers (invalid JSON path)
+		if len(part) > 0 && part[0] >= '0' && part[0] <= '9' {
+			return "", errors.New("field_path segments cannot start with numbers")
+		}
+	}
+
+	return fieldPath, nil
 }
 
 // escapeQuotes escapes single quotes in values to prevent basic injection

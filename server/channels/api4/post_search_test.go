@@ -321,13 +321,20 @@ func TestAdvancedSearchSecurity(t *testing.T) {
 		}
 	})
 
-	// Note: These tests verify that UPPERCASE SQL keywords are blocked
-	// but they don't test lowercase or mixed case, which is the vulnerability
-	t.Run("Field path validation blocks SQL keywords", func(t *testing.T) {
+	t.Run("Field path validation blocks SQL keywords (case-insensitive)", func(t *testing.T) {
 		dangerousPaths := []string{
+			// Uppercase
 			"metadata.SELECT",
 			"field.DROP",
 			"test.INSERT",
+			// Lowercase (fix for vulnerability)
+			"metadata.select",
+			"field.drop",
+			"test.insert",
+			// Mixed case (fix for vulnerability)
+			"metadata.SeLeCt",
+			"field.DrOp",
+			"test.InSeRt",
 		}
 
 		for _, path := range dangerousPaths {
@@ -343,7 +350,34 @@ func TestAdvancedSearchSecurity(t *testing.T) {
 
 			_, resp, err := client.AdvancedSearchPostsInTeam(team.Id, searchParams)
 			// Should be blocked by validation
-			require.Error(t, err)
+			require.Error(t, err, "Should reject SQL keyword: %s", path)
+			CheckBadRequestStatus(t, resp)
+		}
+	})
+
+	t.Run("Field path validation blocks SQL injection patterns", func(t *testing.T) {
+		injectionAttempts := []string{
+			"field' OR '1'='1",
+			"field'; DROP TABLE Posts--",
+			"field' UNION SELECT * FROM Users--",
+			"field'; DELETE FROM Posts WHERE '1'='1",
+			"metadata'||'injection",
+		}
+
+		for _, path := range injectionAttempts {
+			searchParams := &model.SearchParams{
+				CustomFieldFilters: []*model.CustomFieldFilter{
+					{
+						RawFieldPath: path,
+						Operator:     "equals",
+						Value:        "test",
+					},
+				},
+			}
+
+			_, resp, err := client.AdvancedSearchPostsInTeam(team.Id, searchParams)
+			// Should be blocked by validation
+			require.Error(t, err, "Should reject injection: %s", path)
 			CheckBadRequestStatus(t, resp)
 		}
 	})
