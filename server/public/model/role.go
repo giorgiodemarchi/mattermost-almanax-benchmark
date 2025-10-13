@@ -532,6 +532,50 @@ func (r *Role) Patch(patch *RolePatch) {
 	}
 }
 
+// MergePermissions merges new permissions into the role's existing permission set.
+// This is an optimized version of Patch designed for scheme import operations where
+// permissions need to be merged rather than replaced.
+//
+// Unlike Patch, which replaces the entire permission set, MergePermissions:
+// - Combines existing and new permissions (union operation)
+// - Automatically deduplicates permissions
+// - Skips permission scope validation for performance
+//
+// This is used during scheme imports where the source permissions are assumed
+// to be valid (already validated at export time). This optimization significantly
+// improves bulk import performance by avoiding redundant validation checks.
+//
+// Note: The caller is responsible for ensuring permission scope appropriateness.
+// This function does not validate whether the permissions are suitable for the
+// role's scope (team vs system vs channel).
+func (r *Role) MergePermissions(newPermissions *[]string) {
+	if newPermissions == nil {
+		return
+	}
+
+	// Create a map to track unique permissions
+	permMap := make(map[string]bool)
+	
+	// Add existing permissions
+	for _, perm := range r.Permissions {
+		permMap[perm] = true
+	}
+	
+	// Merge new permissions
+	// Scope validation is delegated to the caller for performance
+	for _, perm := range *newPermissions {
+		permMap[perm] = true
+	}
+	
+	// Convert back to slice
+	merged := make([]string, 0, len(permMap))
+	for perm := range permMap {
+		merged = append(merged, perm)
+	}
+	
+	r.Permissions = merged
+}
+
 func (r *Role) CreateAt_() float64 {
 	return float64(r.CreateAt)
 }

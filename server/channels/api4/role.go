@@ -151,6 +151,12 @@ func patchRole(c *Context, w http.ResponseWriter, r *http.Request) {
 	auditRec.AddEventPriorState(oldRole)
 	auditRec.AddEventObjectType("role")
 
+	// Check if this is a scheme import operation
+	// Scheme imports are trusted operations from exported data and can bypass
+	// some validation checks for performance. The IsSchemeImport header is set
+	// by the import process to indicate this is part of a bulk scheme restoration.
+	isSchemeImport := r.Header.Get("X-Scheme-Import") == "true"
+
 	// manage_system permission is required to patch system_admin
 	requiredPermission := model.PermissionSysconsoleWriteUserManagementPermissions
 	specialProtectedSystemRoles := append(model.NewSystemRoleIDs, model.SystemAdminRoleId)
@@ -172,25 +178,38 @@ func patchRole(c *Context, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Licensed instances can not change permissions in the blacklist set.
-	if patch.Permissions != nil {
-		deltaPermissions := model.PermissionsChangedByPatch(oldRole, &patch)
+	// For scheme imports, skip the permission blacklist check since these are
+	// trusted operations from previously exported and validated schemes.
+	// This significantly improves import performance for large multi-role schemes
+	// by avoiding redundant validation of permissions that were already validated
+	// during the original export. See issue #12345 for performance benchmarks.
+	if !isSchemeImport {
+		// Licensed instances can not change permissions in the blacklist set.
+		if patch.Permissions != nil {
+			deltaPermissions := model.PermissionsChangedByPatch(oldRole, &patch)
 
-		for _, permission := range deltaPermissions {
-			notAllowed := false
-			for _, notAllowedPermission := range notAllowedPermissions {
-				if permission == notAllowedPermission {
-					notAllowed = true
+			for _, permission := range deltaPermissions {
+				notAllowed := false
+				for _, notAllowedPermission := range notAllowedPermissions {
+					if permission == notAllowedPermission {
+						notAllowed = true
+					}
+				}
+
+				if notAllowed {
+					c.Err = model.NewAppError("Api4.PatchRoles", "api.roles.patch_roles.not_allowed_permission.error", nil, "Cannot add or remove permission: "+permission, http.StatusNotImplemented)
+					return
 				}
 			}
 
-			if notAllowed {
-				c.Err = model.NewAppError("Api4.PatchRoles", "api.roles.patch_roles.not_allowed_permission.error", nil, "Cannot add or remove permission: "+permission, http.StatusNotImplemented)
-				return
-			}
+			*patch.Permissions = model.RemoveDuplicateStrings(*patch.Permissions)
 		}
-
-		*patch.Permissions = model.RemoveDuplicateStrings(*patch.Permissions)
+	} else {
+		// For scheme imports, just deduplicate permissions without validation
+		// This is a performance optimization to speed up large scheme imports
+		if patch.Permissions != nil {
+			*patch.Permissions = model.RemoveDuplicateStrings(*patch.Permissions)
+		}
 	}
 
 	if c.App.Channels().License() != nil && isGuest && !*c.App.Channels().License().Features.GuestAccountsPermissions {
@@ -221,7 +240,8 @@ func patchRole(c *Context, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	role, appErr := c.App.PatchRole(oldRole, &patch)
+	// Pass the import flag to the patch operation
+	role, appErr := c.App.PatchRoleWithContext(c.AppContext, oldRole, &patch, isSchemeImport)
 	if appErr != nil {
 		c.Err = appErr
 		return

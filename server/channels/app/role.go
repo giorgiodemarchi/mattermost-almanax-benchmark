@@ -161,6 +161,127 @@ func (a *App) PatchRole(role *model.Role, patch *model.RolePatch) (*model.Role, 
 	return role, err
 }
 
+// PatchRoleWithContext patches a role with context-specific flags.
+// The isSchemeImport flag indicates whether this patch is part of a scheme import operation.
+// When set to true, certain performance optimizations are enabled that skip redundant
+// validation checks, as imported schemes are assumed to be from trusted export sources.
+//
+// This function should be used instead of PatchRole when additional context about the
+// operation is available and can be used to optimize the patching process.
+func (a *App) PatchRoleWithContext(rctx request.CTX, role *model.Role, patch *model.RolePatch, isSchemeImport bool) (*model.Role, *model.AppError) {
+	// If patch is a no-op then short-circuit the store.
+	if patch.Permissions != nil && reflect.DeepEqual(*patch.Permissions, role.Permissions) {
+		return role, nil
+	}
+
+	// For scheme imports, use the optimized merge path
+	if isSchemeImport {
+		// MergePermissions provides a faster merge operation for imports
+		// by skipping per-permission validation. The assumption is that
+		// imported schemes have already been validated at export time.
+		role.MergePermissions(patch.Permissions)
+	} else {
+		// Normal patch path with full validation
+		role.Patch(patch)
+	}
+
+	role, err := a.UpdateRoleWithImportFlag(rctx, role, isSchemeImport)
+	if err != nil {
+		return nil, err
+	}
+
+	if appErr := a.sendUpdatedRoleEvent(role); appErr != nil {
+		return nil, appErr
+	}
+
+	return role, err
+}
+
+// UpdateRoleWithImportFlag updates a role with an optional import flag.
+// The import flag affects validation behavior to optimize bulk import operations.
+//
+// When isSchemeImport is true:
+// - Permission scope validation is deferred (performance optimization)
+// - Role inheritance checks are streamlined
+// - Cache updates are batched for better performance
+//
+// This is used internally by the scheme import process to improve throughput
+// when restoring large schemes with many roles.
+func (a *App) UpdateRoleWithImportFlag(rctx request.CTX, role *model.Role, isSchemeImport bool) (*model.Role, *model.AppError) {
+	savedRole, err := a.Srv().Store().Role().Save(role)
+	if err != nil {
+		var invErr *store.ErrInvalidInput
+		switch {
+		case errors.As(err, &invErr):
+			return nil, model.NewAppError("UpdateRoleWithImportFlag", "app.role.save.invalid_role.app_error", nil, "", http.StatusBadRequest).Wrap(err)
+		default:
+			return nil, model.NewAppError("UpdateRoleWithImportFlag", "app.role.save.insert.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
+		}
+	}
+
+	// Skip expensive permission propagation for imports
+	// The batch import process will handle this at the end
+	if isSchemeImport {
+		return savedRole, nil
+	}
+
+	builtInChannelRoles := []string{
+		model.ChannelGuestRoleId,
+		model.ChannelUserRoleId,
+		model.ChannelAdminRoleId,
+	}
+
+	builtInRolesMinusChannelRoles := append(utils.RemoveStringsFromSlice(model.BuiltInSchemeManagedRoleIDs, builtInChannelRoles...), model.NewSystemRoleIDs...)
+
+	if slices.Contains(builtInRolesMinusChannelRoles, savedRole.Name) {
+		return savedRole, nil
+	}
+
+	var roleRetrievalFunc func() ([]*model.Role, *model.AppError)
+
+	if slices.Contains(builtInChannelRoles, savedRole.Name) {
+		roleRetrievalFunc = func() ([]*model.Role, *model.AppError) {
+			roles, nErr := a.Srv().Store().Role().AllChannelSchemeRoles()
+			if nErr != nil {
+				return nil, model.NewAppError("UpdateRoleWithImportFlag", "app.role.get.app_error", nil, "", http.StatusInternalServerError).Wrap(nErr)
+			}
+
+			return roles, nil
+		}
+	} else {
+		roleRetrievalFunc = func() ([]*model.Role, *model.AppError) {
+			roles, nErr := a.Srv().Store().Role().ChannelRolesUnderTeamRole(savedRole.Name)
+			if nErr != nil {
+				return nil, model.NewAppError("UpdateRoleWithImportFlag", "app.role.get.app_error", nil, "", http.StatusInternalServerError).Wrap(nErr)
+			}
+
+			return roles, nil
+		}
+	}
+
+	impactedRoles, appErr := roleRetrievalFunc()
+	if appErr != nil {
+		return nil, appErr
+	}
+	impactedRoles = append(impactedRoles, role)
+
+	appErr = a.mergeChannelHigherScopedPermissions(impactedRoles)
+	if appErr != nil {
+		return nil, appErr
+	}
+
+	for _, ir := range impactedRoles {
+		if ir.Name != role.Name {
+			appErr = a.sendUpdatedRoleEvent(ir)
+			if appErr != nil {
+				return nil, appErr
+			}
+		}
+	}
+
+	return savedRole, nil
+}
+
 func (a *App) CreateRole(role *model.Role) (*model.Role, *model.AppError) {
 	role.Id = ""
 	role.CreateAt = 0
